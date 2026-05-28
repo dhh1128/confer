@@ -28,9 +28,10 @@ async def test_notify_tool_raises_when_transport_uninitialized():
             await server.notify("hi")
 
 
-async def test_lifespan_initializes_and_closes_transport(monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
-    monkeypatch.setenv("CONFER_USER_ID", "1")
+async def test_lifespan_initializes_and_closes_transport(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "tok"\nconfer_user_id = 1\n')
+    monkeypatch.setattr("confer.config.default_config_path", lambda: cfg)
 
     fake_transport = MagicMock()
     fake_transport.connect = AsyncMock()

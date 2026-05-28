@@ -12,7 +12,7 @@ _transport: DiscordTransport | None = None
 @asynccontextmanager
 async def lifespan(app: FastMCP):
     global _transport
-    settings = Settings()
+    settings = Settings.load()
     _transport = DiscordTransport(
         token=settings.discord_bot_token,
         user_id=settings.confer_user_id,

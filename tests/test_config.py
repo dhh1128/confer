@@ -1,19 +1,48 @@
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+
 import pytest
-from pydantic import ValidationError
 
-from confer.config import Settings
-
-
-def test_config_loads_from_env(monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token-xyz")
-    monkeypatch.setenv("CONFER_USER_ID", "123456789012345678")
-    settings = Settings(_env_file=None)
-    assert settings.discord_bot_token == "test-token-xyz"
-    assert settings.confer_user_id == 123456789012345678
+from confer.config import Settings, default_config_path
 
 
-def test_config_raises_on_missing_required_var(monkeypatch):
-    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("CONFER_USER_ID", raising=False)
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None)
+def test_default_config_path_is_xdg_conformant():
+    assert default_config_path() == Path.home() / ".config" / "confer" / "config.toml"
+
+
+def test_load_from_toml(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "test-token"\nconfer_user_id = 123456789012345678\n')
+    s = Settings.load(cfg)
+    assert s.discord_bot_token == "test-token"
+    assert s.confer_user_id == 123456789012345678
+
+
+def test_load_uses_default_path_when_none_given(monkeypatch, tmp_path):
+    default = tmp_path / "config.toml"
+    default.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')
+    monkeypatch.setattr("confer.config.default_config_path", lambda: default)
+    s = Settings.load()
+    assert s.discord_bot_token == "x"
+
+
+def test_load_raises_when_file_missing(tmp_path):
+    missing = tmp_path / "absent.toml"
+    with pytest.raises(FileNotFoundError) as exc_info:
+        Settings.load(missing)
+    assert str(missing) in str(exc_info.value)
+
+
+def test_load_raises_clear_error_on_missing_required_key(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("confer_user_id = 1\n")
+    with pytest.raises(ValueError, match="discord_bot_token"):
+        Settings.load(cfg)
+
+
+def test_settings_is_frozen(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')
+    s = Settings.load(cfg)
+    with pytest.raises(FrozenInstanceError):
+        s.discord_bot_token = "changed"  # type: ignore[misc]
