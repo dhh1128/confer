@@ -231,6 +231,24 @@ Confer = goal:
         misconfiguration on the first notify (clear failure sentinel return)
         without paying per-call fetch cost.
 
+    HELLO Protocol Version = decision:
+      id: 7pjkmqv4
+      why: >
+        HELLO carries a protocol_version field (integer, starts at 1). The
+        daemon records the client's version on connect and rejects HELLOs
+        with versions it does not support (currently: anything other than 1)
+        via HELLO_ERR. Considered no versioning: works fine for v1, but as
+        the protocol grows (ask, check_messages) a client and daemon running
+        different versions (which is the steady state after `uv sync`
+        upgrades the client without restarting the daemon) will see
+        "unknown message kind" errors at the first new message — opaque to
+        the user, surfaces as "agent suddenly broken." Versioning makes the
+        skew explicit at HELLO time with a clear error pointing at the
+        upgrade. Considered semver-style major.minor.patch: overkill; a
+        single monotonically-incrementing integer is sufficient given the
+        simple protocol and small surface. Recorded after DevOps Engineer
+        adversarial review (2026-05-28) raised the skew gap.
+
     # ─── DAEMON ARCHITECTURE ─────────────────────────────────────────────────
 
     Central Daemon Architecture = decision:
@@ -493,6 +511,24 @@ Confer = goal:
         experience shows transient failures are common and agents do not
         retry well in practice, this decision is cheap to revisit.
 
+    Notify Before Hello Rejected = decision:
+      id: xn7pqv4m
+      why: >
+        When a client sends NOTIFY (or future ASK / CHECK_MESSAGES) before
+        HELLO, the daemon rejects with Error(code="hello_required") and
+        does not act on the message. Considered silently accepting and
+        dispatching: simpler code, but with multi-agent reply routing
+        (7kxpvnqj) the daemon needs the client's assigned label to attribute
+        messages and route asks; without HELLO it does not know who is
+        notifying. Considered accepting with an "anonymous" label: ambiguous
+        in the Discord UI ("[anonymous] task done") and racy with future
+        check_messages broadcast. Rejecting forces clients to identify
+        themselves before doing work, which is a precondition for every
+        downstream feature. STATUS (daemon-internal CLI query) is exempt —
+        it has no agent identity and reading daemon state does not require
+        registration. Surfaced by Testability Hawk adversarial review
+        (2026-05-28); behavior was previously undeclared.
+
     Reply Routing Rules = decision:
       id: 7kxpvnqj
       why: >
@@ -632,6 +668,75 @@ Confer = goal:
         "this is the reply" without adding friction (e.g., a long-press
         gesture or a single-tap reply-mode toggle).
 
+    Mock Depth At discord.py Boundary = tension:
+      id: 4vxn7pqm
+      nature: >
+        Testability Hawk (adversarial review 2026-05-28) noted that the
+        discord.py boundary mock is shallow — discord.NotFound and
+        HTTPException are instantiated against MagicMock responses, but no
+        test verifies that fetch_user / create_dm / Client.start signatures
+        haven't shifted. A discord.py minor-version bump that renames an
+        API would not be detected by the unit-test suite.
+      resolution: >
+        By design per Two-Layer Test Strategy (7vpm2qkx). Mock-based unit
+        tests verify our code's logic, not discord.py's contract; integration
+        tests against a real Discord bot are the catch for upstream API
+        drift. The deviation Integration Tests Exempt (gjx4m7p2)
+        acknowledges this layering and exempts integration tests from
+        coverage. The remaining concern — that integration tests do not yet
+        exist on disk — is captured separately as Integration Tests Not Yet
+        Implemented (5nqx7pmw).
+      resolved-by: dh, 2026-05-28
+
+    Integration Tests Not Yet Implemented = tension:
+      id: 5nqx7pmw
+      nature: >
+        Two-Layer Test Strategy (7vpm2qkx) and the Integration Tests Exempt
+        deviation (gjx4m7p2) describe an integration test layer gated behind
+        CONFER_INTEGRATION=1 that hits a real Discord test bot. No
+        integration tests have actually been written; the "two-layer"
+        strategy is currently one layer. Testability Hawk (2026-05-28)
+        raised this; it is also the strict precondition for closing the
+        Mock Depth tension (4vxn7pqm).
+      revisit-when: >
+        The first manual end-to-end smoke test of the daemon-backed notify
+        succeeds (planned for phase 2B post-push). At that point, capture
+        the exact sequence — create test bot, write config.toml, run
+        confer-daemon, send a notify — as the first env-var-gated integration
+        test under tests/integration/.
+
+    NDJSON Input Size Unbounded = tension:
+      id: 7pqkn4vx
+      nature: >
+        Security Hawk (adversarial review 2026-05-28) observed that the
+        daemon's _handle_client read loop uses asyncio's default 64 KiB
+        StreamReader line limit and does not catch LimitOverrunError.
+        A malformed oversized NDJSON line tears down the offending client
+        connection without sending an Error diagnostic. Not exploitable
+        under the single-user threat model, and Discord enforces a 2000-char
+        cap on outgoing messages so legitimate traffic is bounded.
+      revisit-when: >
+        A future tool argument starts approaching the 64 KiB boundary
+        (e.g., agent passing a large code block to a future ask tool), OR
+        the daemon gains multi-tenant exposure and a misbehaving client
+        could plausibly send oversized lines. Likely fix: catch
+        LimitOverrunError / IncompleteReadError in _handle_client, send
+        Error(code="bad_message", message="line too long"), close cleanly.
+
+    Async Polling Loop Flakiness Risk = tension:
+      id: 3vxm7qnp
+      nature: >
+        Testability Hawk (2026-05-28) observed that test_serve_* tests in
+        test_daemon_core.py poll with `await asyncio.sleep(0.01)` for up to
+        200 iterations (2 s budget) to wait for the daemon to bind. Ran
+        cleanly 3x in the review's flakiness probe, but the pattern is
+        timing-dependent and could flake under high CI load.
+      revisit-when: >
+        A CI run intermittently fails one of the test_serve_* tests. Likely
+        fix: expose an asyncio.Event on Daemon for "ready to accept
+        connections," set it after socket bind, and replace polling with
+        `await asyncio.wait_for(event.wait(), timeout=5)`.
+
     Daemon Death Loses Pending State = tension:
       id: nq7pxw4m
       nature: >
@@ -655,3 +760,57 @@ Confer = goal:
         ${XDG_STATE_HOME:-$HOME/.local/state}/confer/state.db that the
         daemon writes-through on every state change and reads on startup to
         recover.
+
+    # ─── PROMPT AUDIT HISTORY ────────────────────────────────────────────────
+
+    Prompt Audit History = constraint:
+      id: vp4nm7qx
+      why: >
+        Tracks last-run dates and finding summaries for adversarial-review
+        personas, so gate ceremonies can identify overdue audits and
+        recommend them before gate closes. Introduced at the phase 2B gate,
+        after the first adversarial review. Cadence "every-3-phases" is a
+        starting heuristic; adjust based on whether findings density grows
+        or shrinks over time.
+      children:
+        security-hawk:
+          id: 5pqnx7vk
+          last-run: 2026-05-28
+          phase: 2B
+          finding-summary: >
+            0 critical; 3 significant (socket TOCTOU + 0700 fallback dir,
+            NDJSON line-length bound, fallback-dir perms); 3 minor (config
+            file perms warning, confer-daemon PATH-resolution log, liveness-
+            probe-vs-lock observation). Accept-recommended findings fixed
+            in remediation commits; NDJSON line-length deferred as tension
+            7pqkn4vx.
+          recommended-cadence: every-3-phases
+        devops-engineer:
+          id: 7nqpvxm4
+          last-run: 2026-05-28
+          phase: 2B
+          finding-summary: >
+            2 critical (SIGTERM handler missing → cleanup unreachable on
+            stop, PID file never validated against live process); 5
+            significant (bind-before-PID race, gateway task fire-and-forget,
+            wait_for_ready no timeout, Settings.load bare FileNotFoundError,
+            uv.lock currency); 6 minor. All critical and accept-recommended
+            significant fixed in remediation commits.
+          recommended-cadence: every-3-phases
+        testability-hawk:
+          id: kpqxnm7v
+          last-run: 2026-05-28
+          phase: 2B
+          finding-summary: >
+            3 critical (CLI tests with unawaited coroutines, no concurrency
+            tests despite phase being about concurrency, no integration
+            tests on disk); 5 significant (settings-flow assertion missing,
+            polling-loop flake risk, discord.py mock depth, time.time
+            monkeypatch outside try, sleep(0) race-win); 4 minor + 8
+            coverage-vs-correctness / hygiene observations. CLI tests
+            fixed; thorough concurrency tests added; integration tests
+            deferred as tension 5nqx7pmw; mock-depth rebutted as
+            by-design tension 4vxn7pqm; significant items addressed per
+            user direction. RuntimeWarning suppression explicitly NOT
+            added — the warning is signal we want to keep.
+          recommended-cadence: every-3-phases
