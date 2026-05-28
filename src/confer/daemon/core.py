@@ -11,13 +11,15 @@ from pathlib import Path
 
 from confer.daemon.transport import FAILURE_PREFIX, DiscordTransport
 from confer.protocol import (
+    CURRENT_PROTOCOL_VERSION,
     Bye,
     Error,
     Hello,
-    Notify,
-    NotifyResult,
+    HelloErr,
     HelloOk,
     Message,
+    Notify,
+    NotifyResult,
     Status,
     StatusResult,
     decode,
@@ -159,22 +161,26 @@ class Daemon:
         client_label: str | None,
     ) -> str | None:
         if isinstance(msg, Hello):
+            if msg.protocol_version != CURRENT_PROTOCOL_VERSION:
+                await self._send(
+                    writer,
+                    HelloErr(
+                        request_id=msg.request_id,
+                        reason=(
+                            f"protocol_version {msg.protocol_version} not "
+                            f"supported (daemon speaks "
+                            f"{CURRENT_PROTOCOL_VERSION}); restart the daemon "
+                            f"after upgrading"
+                        ),
+                    ),
+                )
+                return None
             label = self._assign_label(msg.label_preferred, msg.pid)
             self._clients[label] = _Client(label=label, writer=writer)
             await self._send(
                 writer, HelloOk(request_id=msg.request_id, label_assigned=label)
             )
             return label
-        if isinstance(msg, Notify):
-            info = await self._transport.notify(msg.message)
-            status = "failed" if info.startswith(FAILURE_PREFIX) else "ok"
-            await self._send(
-                writer,
-                NotifyResult(request_id=msg.request_id, status=status, info=info),
-            )
-            return None
-        if isinstance(msg, Bye):
-            return None
         if isinstance(msg, Status):
             uptime = (
                 0.0 if self._start_time is None else time.time() - self._start_time
@@ -188,6 +194,28 @@ class Daemon:
                     gateway_state=gateway,
                     clients=sorted(self._clients.keys()),
                 ),
+            )
+            return None
+        if isinstance(msg, Bye):
+            return None
+        if client_label is None:
+            await self._send(
+                writer,
+                Error(
+                    code="hello_required",
+                    message=(
+                        f"HELLO must be sent before {type(msg).__name__}"
+                    ),
+                    request_id=getattr(msg, "request_id", None),
+                ),
+            )
+            return None
+        if isinstance(msg, Notify):
+            info = await self._transport.notify(msg.message)
+            status = "failed" if info.startswith(FAILURE_PREFIX) else "ok"
+            await self._send(
+                writer,
+                NotifyResult(request_id=msg.request_id, status=status, info=info),
             )
             return None
         await self._send(

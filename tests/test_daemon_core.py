@@ -8,9 +8,11 @@ import pytest
 from confer.daemon.core import Daemon, _Client, _make_disambiguator
 from confer.daemon.transport import FAILURE_PREFIX
 from confer.protocol import (
+    CURRENT_PROTOCOL_VERSION,
     Bye,
     Error,
     Hello,
+    HelloErr,
     HelloOk,
     Notify,
     NotifyResult,
@@ -159,19 +161,66 @@ async def test_empty_line_is_skipped():
     assert _written_messages(writer) == []
 
 
-async def test_unexpected_message_kind_returns_error():
+async def test_hello_with_unsupported_protocol_version_returns_hello_err():
     daemon = _make_daemon()
     reader = _reader_with(
-        [HelloOk(request_id="r1", label_assigned="x")]  # client should never send this
+        [Hello(request_id="r1", label_preferred="x", pid=1, protocol_version=999)]
     )
     writer = _writer_mock()
 
     await daemon._handle_client(reader, writer)
 
     response = _written_messages(writer)[0]
-    assert isinstance(response, Error)
-    assert response.code == "unexpected_message"
+    assert isinstance(response, HelloErr)
     assert response.request_id == "r1"
+    assert "protocol_version 999 not supported" in response.reason
+    # No client registered
+    assert "x" not in daemon._clients
+
+
+async def test_notify_before_hello_returns_hello_required_error():
+    daemon = _make_daemon()
+    reader = _reader_with([Notify(request_id="r1", message="hi")])
+    writer = _writer_mock()
+
+    await daemon._handle_client(reader, writer)
+
+    response = _written_messages(writer)[0]
+    assert isinstance(response, Error)
+    assert response.code == "hello_required"
+    assert response.request_id == "r1"
+    # transport.notify was never called
+    daemon._transport.notify.assert_not_called()
+
+
+async def test_status_does_not_require_hello():
+    """STATUS comes from the CLI; it has no agent identity and must work
+    without prior HELLO."""
+    daemon = _make_daemon()
+    daemon._start_time = 100.0
+    reader = _reader_with([Status(request_id="r1")])
+    writer = _writer_mock()
+
+    await daemon._handle_client(reader, writer)
+
+    response = _written_messages(writer)[0]
+    assert isinstance(response, StatusResult)
+
+
+async def test_unexpected_message_kind_returns_error():
+    daemon = _make_daemon()
+    reader = _reader_with([
+        Hello(request_id="r0", label_preferred="x", pid=1),
+        HelloOk(request_id="r1", label_assigned="x"),  # client should never send this
+    ])
+    writer = _writer_mock()
+
+    await daemon._handle_client(reader, writer)
+
+    responses = _written_messages(writer)
+    assert isinstance(responses[1], Error)
+    assert responses[1].code == "unexpected_message"
+    assert responses[1].request_id == "r1"
 
 
 async def test_client_disconnect_removes_label_from_registry():

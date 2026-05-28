@@ -3,11 +3,15 @@ from dataclasses import asdict, dataclass
 from typing import Literal, Union
 
 
+CURRENT_PROTOCOL_VERSION = 1
+
+
 @dataclass(frozen=True)
 class Hello:
     request_id: str
     label_preferred: str
     pid: int
+    protocol_version: int = CURRENT_PROTOCOL_VERSION
     kind: Literal["HELLO"] = "HELLO"
 
 
