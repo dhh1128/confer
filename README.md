@@ -20,30 +20,54 @@ uv run pytest    # runs the test suite with branch coverage (target: 100%)
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in:
+Copy [`config.toml.example`](config.toml.example) to `~/.config/confer/config.toml` and fill in:
 
-- `DISCORD_BOT_TOKEN` — bot token from [discord.com/developers/applications](https://discord.com/developers/applications).
-- `CONFER_USER_ID` — your Discord user snowflake (Settings → Advanced → enable Developer Mode, then right-click your name → Copy User ID).
+- `discord_bot_token` — bot token from [discord.com/developers/applications](https://discord.com/developers/applications).
+- `confer_user_id` — your Discord user snowflake (Settings → Advanced → enable Developer Mode, then right-click your name → Copy User ID).
+
+```bash
+mkdir -p ~/.config/confer
+cp config.toml.example ~/.config/confer/config.toml
+chmod 600 ~/.config/confer/config.toml
+# Edit ~/.config/confer/config.toml with your real values.
+```
 
 The bot must share at least one guild with you for it to be able to DM you (Discord's permission rule). A private personal guild containing just you and the bot satisfies this; the guild stays empty — all messaging happens in DMs.
 
-## Running the server
+## Architecture
 
-After configuration:
+confer has two processes:
+
+- **`confer-daemon`** — a long-lived singleton that holds the one Discord Gateway connection and listens on a Unix socket at `$XDG_RUNTIME_DIR/confer.sock` for connections from one-or-more MCP servers. It outlives any individual MCP server (and any individual Claude Code session), so pending state — open `ask` calls, queued check_messages — survives MCP server churn.
+- **`confer-server`** — the MCP server, spawned by each Claude Code (or Cursor, etc.) session as a stdio child process. It's a thin shim: it auto-detects an agent label from `{repo}/{branch}`, connects to the daemon (auto-spawning it if it's not already running), and forwards tool calls. Multiple concurrent MCP servers all share the one daemon's Gateway connection.
+
+### Running the MCP server
+
+After configuration, point your MCP client (Claude Code, Cursor, etc.) at:
 
 ```bash
-uv run confer-server          # runs the MCP server on stdio (for use by an MCP client)
+uv run confer-server
 ```
 
-Point your MCP client (Claude Code, Cursor, etc.) at this command. The server initializes by connecting to the Discord Gateway and waits for the connection to be ready before accepting tool calls.
+The MCP server will auto-spawn the daemon if it isn't already running. You don't need to start the daemon manually.
+
+### Managing the daemon
+
+```bash
+confer-daemon            # run the daemon in the foreground (used by auto-spawn)
+confer-daemon status     # show PID, uptime, gateway state, connected MCP servers, log tail
+confer-daemon stop       # gracefully terminate the running daemon
+```
+
+Logs are written to `$XDG_STATE_HOME/confer/daemon.log` (default `~/.local/state/confer/daemon.log`), rotated at 10 MB with 3 archives kept.
 
 ## Tools exposed
 
-Phase 2A status — only `notify` is implemented; `ask` and `check_messages` are next.
+Phase 2B status — only `notify` is implemented; `ask` and `check_messages` are next.
 
 | Tool | Signature | Behavior |
 |------|-----------|----------|
-| `notify` | `notify(message: str) -> str` | DMs `message` to the configured user. Returns `"sent at <ISO timestamp>"` on success or `"<NOTIFY_FAILED: <reason>>"` on failure (no retries). |
+| `notify` | `notify(message: str) -> str` | DMs `message` to the configured user via the daemon's Discord Gateway connection. Returns `"sent at <ISO timestamp>"` on success or `"<NOTIFY_FAILED: <reason>>"` on failure (no retries). The agent's auto-derived label disambiguates messages from multiple concurrent agents (planned for phase 2C — currently the raw message body is sent unprefixed). |
 
 ## Where things live
 

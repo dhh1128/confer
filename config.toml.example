@@ -1,0 +1,11 @@
+# confer daemon configuration
+# Copy this file to ~/.config/confer/config.toml and fill in real values.
+# Permissions: chmod 600 ~/.config/confer/config.toml
+
+# Discord bot token from https://discord.com/developers/applications
+discord_bot_token = ""
+
+# Your Discord user ID (snowflake, 18-19 digits).
+# Discord → Settings → Advanced → enable Developer Mode,
+# then right-click your name → Copy User ID.
+confer_user_id = 0
