@@ -2,30 +2,24 @@ from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
-from confer.config import Settings
-from confer.daemon.transport import DiscordTransport
+from confer.client import DaemonClient
 
 
-_transport: DiscordTransport | None = None
+_client: DaemonClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
-    global _transport
-    settings = Settings.load()
-    _transport = DiscordTransport(
-        token=settings.discord_bot_token,
-        user_id=settings.confer_user_id,
-    )
-    await _transport.connect()
-    await _transport.wait_for_ready()
+    global _client
+    _client = DaemonClient()
+    await _client.connect()
     try:
         yield
     finally:
         try:
-            await _transport.close()
+            await _client.close()
         finally:
-            _transport = None
+            _client = None
 
 
 mcp = FastMCP("confer", lifespan=lifespan)
@@ -36,13 +30,15 @@ async def notify(message: str) -> str:
     """Send a notification to the user via Discord DM.
 
     Returns "sent at <ISO-8601 UTC timestamp>" on success, or
-    "<NOTIFY_FAILED: <reason>>" on failure (no retries).
+    "<NOTIFY_FAILED: <reason>>" on failure (no retries). The message is
+    prefixed with this agent's auto-derived label so the user can tell
+    which agent is talking when multiple agents are running.
     """
-    if _transport is None:
+    if _client is None:
         raise RuntimeError(
-            "DiscordTransport not initialized; server lifespan did not start"
+            "DaemonClient not initialized; server lifespan did not start"
         )
-    return await _transport.notify(message)
+    return await _client.notify(message)
 
 
 def main() -> None:
