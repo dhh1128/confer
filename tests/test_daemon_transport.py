@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from confer.transport import DiscordTransport, FAILURE_PREFIX, SUCCESS_PREFIX
+from confer.daemon.transport import DiscordTransport, FAILURE_PREFIX, SUCCESS_PREFIX
 
 
 def _make_transport_with_mocked_client() -> DiscordTransport:

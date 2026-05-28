@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 
 from confer.config import Settings
-from confer.transport import DiscordTransport
+from confer.daemon.transport import DiscordTransport
 
 
 _transport: DiscordTransport | None = None
