@@ -141,7 +141,77 @@ Confer = goal:
         Manager vs macOS Keychain vs Linux Secret Service); not justified for
         a single-user personal tool. Considered shell env only: fragile —
         easy to forget when restarting the agent client. .env is the Python
-        ecosystem default and survives shell restarts.
+        ecosystem default and survives shell restarts. (Library choice
+        refined in Settings Via Pydantic Settings, 5qx2wkpn.)
+
+    Settings Via Pydantic Settings = decision:
+      id: 5qx2wkpn
+      why: >
+        Configuration is loaded via pydantic-settings's BaseSettings, sourcing
+        from a .env file at the repo root (built-in env_file support).
+        Required fields for v1: discord_bot_token (str), confer_user_id
+        (int — Discord snowflake). This refines the library choice that was
+        speculative in Bot Token In .env (pq3xnk5m); the .env location and
+        .gitignore treatment are unchanged. Considered plain python-dotenv:
+        lighter (no pydantic dependency), but requires hand-written validation
+        and produces less clear errors on missing or malformed env vars.
+        Considered raw os.environ access: brittle. pydantic-settings gives
+        required-field validation at startup (server fails to initialize with
+        a clear message if a required var is missing), type coercion
+        (CONFER_USER_ID parsed as int), and a self-documenting Settings class
+        as the single source of truth for all configuration. The pydantic v2
+        dependency (~3 MB) is acceptable for the value provided and pays off
+        more as configuration grows.
+
+    DiscordTransport Class = decision:
+      id: b6npq7wm
+      why: >
+        All Discord interaction is encapsulated in a single DiscordTransport
+        class in src/confer/transport.py. Methods needed across the phases:
+        connect(), wait_for_ready(), notify(message), and later ask(...) and
+        check_messages(). Considered a flat functions-only API with a
+        discord.py Client held in module state: stateless-looking but smuggles
+        global state (cached DM channel, last-seen message id) into
+        module-level variables, which fights testability. Considered
+        subclassing discord.py's Client directly: tighter coupling, and
+        exposes discord.py's full surface where we only want our own narrower
+        one. Composition (DiscordTransport holds a discord.py Client
+        internally and exposes only our intended methods) gives a single mock
+        seam for unit tests and a clean place for transport-level state.
+
+    Init Blocks On Gateway Ready = decision:
+      id: 4vfnx7pq
+      why: >
+        The MCP server's initialize handler establishes the Discord Gateway
+        connection and waits for discord.py's on_ready event before returning.
+        Tool calls thereafter assume the Gateway is connected and ready.
+        Considered per-call readiness check + short wait: spreads the
+        readiness concern across every tool implementation, and a tool can in
+        principle be called before initialize completes depending on the MCP
+        client's behavior. Considered fire-and-forget initialize that returns
+        immediately and lazy-connects on first tool call: would surface
+        connection failures as "notify failed" rather than "server failed to
+        initialize," which obscures the actual problem and adds latency to
+        the first tool call. Blocking initialize concentrates the
+        connection-failure surface in one expected place (server startup) and
+        lets tool implementations be straight-line. Acceptable cost: ~1-3s
+        startup delay (typical Discord Gateway connect + ready time), well
+        inside any plausible MCP-protocol startup tolerance.
+
+    DM Channel Lazy Cached = decision:
+      id: gjw3pq7n
+      why: >
+        DiscordTransport fetches the target user and creates the DM channel
+        lazily on first send (fetch_user(confer_user_id) → User.create_dm() →
+        DMChannel), then caches the DMChannel reference on the transport
+        instance for all subsequent sends. Considered eager pre-create at
+        startup: catches a bad CONFER_USER_ID earlier (during initialize) but
+        adds startup latency and complicates the initialize handler with a
+        second blocking step beyond Gateway-ready. Considered no caching
+        (re-fetch user and recreate DM channel every send): wasted API calls
+        and per-call latency for no benefit. Lazy+cache surfaces user-id
+        misconfiguration on the first notify (clear failure sentinel return)
+        without paying per-call fetch cost.
 
     # ─── TOOL SURFACE ────────────────────────────────────────────────────────
 
@@ -227,6 +297,38 @@ Confer = goal:
         In-memory picked for v1 to minimize state footprint; reopening with a
         persistent variant is a small refactor when warranted — see tension
         Proactive Messages Lost On Restart.
+
+    notify Tool Signature = decision:
+      id: m7nqxpk4
+      why: >
+        Signature: notify(message: str) -> str. Returns a descriptive success
+        string ("sent at <ISO-8601 UTC timestamp>") on success and a sentinel
+        string ("<NOTIFY_FAILED: <reason>>") on failure. Considered -> None
+        with exceptions on failure: MCP passes exceptions through as tool
+        errors that the calling agent must handle as error conditions rather
+        than as informational results, which obscures the "I tried, here is
+        what happened" nature of the outcome. Considered -> dict {sent_at,
+        message_id, status}: structurally cleaner but overkill for a
+        fire-and-forget tool — the agent rarely needs the message_id. String
+        returns also keep the result class uniform with the sentinel pattern
+        already established for ask timeouts (Sentinel Returns Not Exceptions,
+        nx2pj4wq), letting the agent's natural-language reasoning handle both
+        outcomes the same way.
+
+    notify Fail Fast = decision:
+      id: 3kpwn7mj
+      why: >
+        On a Discord API failure (network error, HTTPException, NotFound),
+        notify returns the failure sentinel immediately — no retries inside
+        the transport. Considered retry-with-exponential-backoff (e.g., 3
+        attempts with jitter): would mask transient network blips but adds
+        complexity (interruption handling, jitter strategy, when-to-stop
+        rules) for marginal value on a personal tool. Explicit retry by the
+        calling agent (just call notify again) is more debuggable than
+        implicit retry inside the transport, and the agent has better context
+        for whether retrying makes sense for the specific message. If
+        experience shows transient failures are common and agents do not
+        retry well in practice, this decision is cheap to revisit.
 
     # ─── NAMING ──────────────────────────────────────────────────────────────
 

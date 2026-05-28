@@ -32,12 +32,16 @@ verification succeeds; you do not need to re-verify within the same session.
 The following operations are reserved for humans. The `.agent-bin` shims
 installed in this repository will block them if an agent attempts them:
 
-- `git push` to protected branches (defaults: `dev`, `main`, `master` — `dev` is included because it is a shared integration branch, not a personal feature branch) and destructive push modes (`--delete`, `--all`, `--mirror`)
+- Destructive push modes (`git push --delete`, `--all`, `--mirror`)
 - `gh pr merge` — merging a pull request
 - `gh repo delete` — deleting the repository
 
-Creating, viewing, and updating pull requests is permitted (`gh pr create`,
-`gh pr edit`), as is pushing feature branches for PR workflows.
+This is a personal project, so the legal-risk rationale that motivates
+default-branch protection in shared/company repositories does not apply
+here. Agents commit and push directly to `main`; no feature-branch + PR
+ceremony is required. The gate ceremony in `docs/methodology.md` §9
+(explicit user approval before each push) still applies and is the
+primary safeguard.
 
 Place `.agent-bin` at the front of PATH in agent shells so the shims are active:
 
