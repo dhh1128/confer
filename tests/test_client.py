@@ -25,13 +25,16 @@ from confer.protocol import (
 
 
 def test_auto_label_uses_git_repo_and_branch():
+    """One combined git call (rev-parse --show-toplevel --abbrev-ref HEAD)
+    returns toplevel and branch on separate lines."""
     def fake_run(cmd, **_):
-        if cmd[1] == "rev-parse":
-            return subprocess.CompletedProcess(cmd, 0, stdout="/home/daniel/code/myapp\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="feat-ask\n", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="/home/daniel/code/myapp\nfeat-ask\n", stderr=""
+        )
 
-    with patch.object(client_mod.subprocess, "run", side_effect=fake_run):
+    with patch.object(client_mod.subprocess, "run", side_effect=fake_run) as mock_run:
         assert auto_label() == "myapp/feat-ask"
+    assert mock_run.call_count == 1
 
 
 def test_auto_label_falls_back_to_cwd_basename_when_not_a_git_repo(monkeypatch, tmp_path):
@@ -55,14 +58,57 @@ def test_auto_label_falls_back_when_git_not_installed(monkeypatch, tmp_path):
         assert auto_label() == "elsewhere/detached"
 
 
-def test_auto_label_uses_detached_when_branch_empty():
+def test_auto_label_uses_detached_on_detached_head(monkeypatch, tmp_path):
+    """Detached HEAD: git outputs 'HEAD' as the abbrev-ref."""
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
     def fake_run(cmd, **_):
-        if cmd[1] == "rev-parse":
-            return subprocess.CompletedProcess(cmd, 0, stdout="/home/d/repo\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="\n", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="/home/d/repo\nHEAD\n", stderr=""
+        )
 
     with patch.object(client_mod.subprocess, "run", side_effect=fake_run):
         assert auto_label() == "repo/detached"
+
+
+def test_auto_label_uses_detached_when_git_output_is_short(monkeypatch, tmp_path):
+    """Defensive: git produced fewer lines than expected; treat as detached."""
+    cwd = tmp_path / "tiny"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    def fake_run(cmd, **_):
+        return subprocess.CompletedProcess(cmd, 0, stdout="\n", stderr="")
+
+    with patch.object(client_mod.subprocess, "run", side_effect=fake_run):
+        assert auto_label() == "tiny/detached"
+
+
+def test_spawn_daemon_closes_log_fh_in_parent(tmp_path, monkeypatch):
+    """The parent process should not retain an open file handle on the
+    daemon log after spawn — leaks across many spawns."""
+    log_path = tmp_path / "daemon.log"
+    monkeypatch.setattr(client_mod, "log_file", lambda: log_path)
+
+    opened = []
+    real_open = open
+
+    def tracking_open(p, *args, **kwargs):
+        fh = real_open(p, *args, **kwargs)
+        opened.append(fh)
+        return fh
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+
+    with patch.object(client_mod.subprocess, "Popen"):
+        client_mod._spawn_daemon()
+
+    # The file handle opened for the daemon log should now be closed
+    daemon_log_handles = [fh for fh in opened if str(getattr(fh, "name", "")) == str(log_path)]
+    assert daemon_log_handles, "expected at least one open on the daemon log"
+    assert all(fh.closed for fh in daemon_log_handles)
 
 
 # ───── DaemonClient end-to-end against a fake daemon ───────────────────────

@@ -145,45 +145,43 @@ class DaemonClient:
 
 
 def auto_label() -> str:
-    return f"{_detect_repo()}/{_detect_branch()}"
+    repo, branch = _detect_repo_and_branch()
+    return f"{repo}/{branch}"
 
 
-def _detect_repo() -> str:
+def _detect_repo_and_branch() -> tuple[str, str]:
+    """Combined git probe: one subprocess for both toplevel and branch.
+    Falls back to (cwd basename, 'detached') when not in a git repo, when
+    git is not installed, or on detached HEAD."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return Path.cwd().name
-    return Path(result.stdout.strip()).name
-
-
-def _detect_branch() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "detached"
-    branch = result.stdout.strip()
-    return branch if branch else "detached"
+        return Path.cwd().name, "detached"
+    lines = result.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return Path.cwd().name, "detached"
+    repo = Path(lines[0]).name
+    branch = lines[1] if lines[1] and lines[1] != "HEAD" else "detached"
+    return repo, branch
 
 
 def _spawn_daemon() -> None:
     log_path = log_file()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "a")
-    subprocess.Popen(
-        ["confer-daemon"],
-        start_new_session=True,
-        stdout=log_fh,
-        stderr=log_fh,
-        stdin=DEVNULL,
-        close_fds=True,
-    )
+    try:
+        subprocess.Popen(
+            ["confer-daemon"],
+            start_new_session=True,
+            stdout=log_fh,
+            stderr=log_fh,
+            stdin=DEVNULL,
+            close_fds=True,
+        )
+    finally:
+        log_fh.close()

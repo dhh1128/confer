@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from contextlib import suppress
 from pathlib import Path
 
@@ -101,11 +102,16 @@ def _cmd_stop() -> int:
     return 1
 
 
-async def _query_status() -> StatusResult | None:
+async def _query_status() -> StatusResult | OSError | None:
+    """Returns:
+       - StatusResult on success
+       - OSError if the socket connection failed (errno on the exception)
+       - None if the daemon responded but with malformed/empty content
+    """
     try:
         reader, writer = await asyncio.open_unix_connection(str(socket_path()))
-    except OSError:
-        return None
+    except OSError as e:
+        return e
     try:
         writer.write(encode(Status(request_id="status")))
         await writer.drain()
@@ -120,6 +126,15 @@ async def _query_status() -> StatusResult | None:
         writer.close()
         with suppress(Exception):
             await writer.wait_closed()
+
+
+def _tail_log(path: Path, n: int) -> list[str]:
+    """Stream the last n lines without slurping the whole file. Returns []
+    if the file is missing."""
+    if not path.exists():
+        return []
+    with path.open("r") as f:
+        return [line.rstrip("\n") for line in deque(f, maxlen=n)]
 
 
 def _format_uptime(seconds: float) -> str:
@@ -141,11 +156,12 @@ def _print_status(pid: int, result: StatusResult) -> None:
     for c in result.clients:
         print(f"    {c}")
     lf = log_file()
-    if not lf.exists():
+    tail = _tail_log(lf, 20)
+    if not tail:
         return
     print()
     print(f"Recent log tail ({lf}):")
-    for line in lf.read_text().splitlines()[-20:]:
+    for line in tail:
         print(f"  {line}")
 
 
@@ -162,6 +178,18 @@ def _cmd_status() -> int:
         print(f"No daemon running (no PID file at {pf}).")
         return 0
     result = asyncio.run(_query_status())
+    if isinstance(result, OSError):
+        errno_str = (
+            f"errno {result.errno}" if result.errno is not None else "unknown errno"
+        )
+        reason = result.strerror or str(result)
+        print(
+            f"Daemon (pid {pid}) socket unreachable: {reason} ({errno_str}). "
+            f"The pid file refers to a confer-daemon process but its socket "
+            f"is not responding; the daemon may be wedged or starting up.",
+            file=sys.stderr,
+        )
+        return 1
     if result is None:
         print(
             f"Daemon (pid {pid}) did not respond to status query.",

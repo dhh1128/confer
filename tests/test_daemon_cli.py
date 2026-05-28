@@ -201,6 +201,28 @@ def test_cmd_status_returns_1_when_daemon_does_not_respond(paths, capsys, monkey
     assert "did not respond" in capsys.readouterr().err
 
 
+def test_cmd_status_surfaces_errno_when_socket_unreachable(paths, capsys, monkeypatch):
+    paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
+    import errno
+    err = ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+    with patch.object(cli.asyncio, "run", return_value=err):
+        assert cli._cmd_status() == 1
+    msg = capsys.readouterr().err
+    assert "socket unreachable" in msg
+    assert "Connection refused" in msg
+    assert f"errno {errno.ECONNREFUSED}" in msg
+
+
+def test_cmd_status_handles_oserror_with_no_errno(paths, capsys, monkeypatch):
+    paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
+    err = OSError("strange error")  # no errno
+    with patch.object(cli.asyncio, "run", return_value=err):
+        assert cli._cmd_status() == 1
+    assert "unknown errno" in capsys.readouterr().err
+
+
 def test_cmd_status_prints_state_and_log_tail(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
     _stub_live_pid(monkeypatch, 12345)
@@ -249,9 +271,10 @@ def test_format_uptime(seconds, expected):
     assert cli._format_uptime(seconds) == expected
 
 
-async def test_query_status_returns_none_when_socket_unreachable(paths):
+async def test_query_status_returns_oserror_when_socket_unreachable(paths):
     result = await cli._query_status()
-    assert result is None
+    assert isinstance(result, OSError)
+    assert result.errno is not None
 
 
 async def test_query_status_returns_result_on_successful_response(tmp_path, monkeypatch):
