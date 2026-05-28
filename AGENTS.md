@@ -108,7 +108,8 @@ Adopt this stance toward it:
 
 For the full context of what `.i` files are, the intellectual lineage of this system, what makes
 a `why` field adequate, and what triggers a required `this.i` update, read `docs/methodology.md`
-(or, if none is present, copy it into this repo from `../origin-platform/docs/origin-platform` and then read it).
+(or, if none is present, copy `methodology.md` and `intent-briefing.md` into `docs/` from
+`../origin-platform/docs/` and then read them).
 DO NOT modify code here without understanding the methodology. You should have a clear idea of
 what a "speculative interview" is, how it's done, and where its output is recorded; what a "tension"
 is in intent; how "marks" work; how we use Fowler's _Refactoring_ discipline to continually improve DRY, encapsulation, and names in code.
