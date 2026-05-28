@@ -6,30 +6,33 @@ When we resolve a gap, either (a) promote it to a `this.i` decision + code chang
 
 ---
 
-## G1 — MCP self-description is too thin to be useful to a fresh Claude
+## G2 — After-fix acid test of `notify` self-description
 
-**Discovered:** 2026-05-28, during phase 2B smoke-test setup.
+**Discovered:** 2026-05-28, as the validation step for Notify Self-Description Policy (`4kxp7qnj`).
 
-**How surfaced:** A Claude Code session in `~/code/confer` (not the active design session — a fresh one Daniel started to register the MCP server) was asked to describe when it would use the `confer` MCP server. It answered well, but on inspection it had drawn entirely from auto-memory, not from anything confer self-advertises. When prompted to inspect what confer *actually* tells a fresh client, it found:
+**Status:** Pending — design fix has landed (server `instructions=` block, purpose-first tool docstring, parameter description). Acid test not yet run.
 
-- **No server-level instructions block.** The MCP system prompt has a `## MCP Server Instructions` section where `kila` gets a paragraph; `confer` contributes nothing. (`FastMCP("confer", lifespan=...)` is constructed without `instructions=`.)
-- **`ListMcpResourcesTool` on `confer` returns empty.** No `confer://about` doc, no usage guide.
-- **`notify` tool description is mechanics-first**, not purpose-first. Current text leads with "Send a notification to the user via Discord DM" — never says *when* to call it or when not to. The whole reason the tool exists (out-of-band ping when terminal output isn't enough) is absent.
-- **`message` parameter has no description.** Schema is `{"properties": {"message": {"title": "Message", "type": "string"}}}` — zero shape guidance for the model.
+**Why this matters:** Before-fix evidence (G1, now resolved) was empirical: a fresh Claude Code session in `~/code/confer` answered "when would you use confer" entirely from auto-memory rather than from anything confer self-advertised, because there was no self-advertising to read. The fixes landed in `this.i` decision `4kxp7qnj` and the code commit immediately following. We now need to verify the fixes actually change behavior, not just the schema.
 
-A fresh Claude reading just this would likely overuse `notify` (as a generic "tell the user" channel) and miss its actual purpose. The auto-memory crutch hides the gap in any session that has it.
+**Test design:**
 
-**Proposed fixes** (ranked by leverage; my disposition in parens):
+1. Spawn a `general-purpose` subagent with `isolation: "worktree"` so the fresh Claude can run in its own context with no inherited memory of confer (the orchestrator's memory of the project doesn't carry into a subagent's context window, but the worktree isolates working-tree state too).
+2. The subagent prompt should set the scene minimally:
+   - Tell it confer's MCP server is registered and `mcp__confer__notify` is available.
+   - Do NOT explain what confer is for. Make it read the server's instructions block and the tool description.
+   - Give it 5-6 mixed-shape micro-tasks where notify should and shouldn't be used:
+     - "Run `uv run pytest`, then tell me how it went." (Routine, should NOT notify — terminal output is right.)
+     - "Kick off `make build` and let me know when it's done. I'm going to grab coffee." (SHOULD notify — explicitly away.)
+     - "Show me the contents of pyproject.toml." (SHOULD NOT notify — synchronous output.)
+     - "Profile the daemon under load. This will take ~30 minutes — wake me up when it's interesting." (SHOULD notify — long-running + away.)
+     - "What does the `_assign_label` function do?" (SHOULD NOT notify — answer in chat.)
+     - "Wait for me to confirm the design — I might step away." (Ambiguous — interesting to see what it does.)
+3. Record whether each notify-or-not decision matches the policy. Also record any over-confident or under-confident invocations.
 
-1. **Server-level instructions block via `FastMCP(..., instructions=...)`** — `[ACCEPT]`. Highest-leverage single change. 4-8 lines covering when-to-use and when-not-to-use. Goes into every client's system prompt automatically.
-2. **Rewrite `notify` tool description purpose-first** — `[ACCEPT]`. Lead with: "Ping the user out-of-band (Discord DM) when they are likely away from the terminal. Use sparingly: long builds done, blockers needing input, scheduled tasks. Do not use for routine progress updates inside an active conversation."
-3. **Add a parameter description to `message`** — `[ACCEPT]`. Tell the model: keep it short, include the most important context (file path, error gist), don't dump a wall of text. Include one concrete example.
-4. **Expose an MCP resource `confer://usage-guide` with long-form policy** — `[DEFER]`. Overkill for a one-tool surface; revisit when `ask` and `check_messages` land (phase 2C/2D) and the policy space is bigger.
-5. **Rename `notify` to something more specific (e.g., `ping_user_offband`, `dm_user_async`)** — `[DEFER, possibly REJECT]`. Touches the recorded Naming decision (`qj4xm7pn`); fixing the description is the cheaper, more direct lever. Revisit only if empirical evidence (#6) shows misuse persisting even with good instructions.
-6. **Acid-test with a fresh Claude** — `[ACCEPT, ordering matters]`. Validation methodology, not a fix in itself. Run before and after the description changes (#1–#3) to verify they actually move behavior:
-   - **Before:** already partially done by the session that discovered this — a clean Claude session in confer that had no MCP self-description to read on. Confirms baseline gap.
-   - **After:** repeat with a fresh Claude session post-fix. Give it 3-5 mixed-shape tasks where notify *should* and *shouldn't* be used; observe whether reaches for notify at the right moments. If misuse pattern persists, then revisit #5 (rename).
+**What we learn:**
 
-**Methodology angle:** The fix is an external-contract change per `docs/methodology.md` §3 (what the MCP client sees and uses to decide invocation). It should land as a `this.i` decision node committed alone before the code change. Tentative node title: "Notify Self-Description Policy" — covers the instructions block, the purpose-first description, the parameter guidance, and the deliberate non-rename.
+- If most decisions align with the policy → fix is sufficient, close G2.
+- If misuse persists in specific patterns → the policy text needs refinement; iterate on the instructions block.
+- If misuse persists *across the board* → revisit `3pqvn7mw` (Notify Tool Name Reconsideration Pending); the name itself may be priming wrong behavior.
 
-**When to act:** After current phase 2B smoke test completes (the manual end-to-end notify verification). Not a blocker for that smoke test itself — `notify` works mechanically; the gap is about how *other* sessions discover it. Probably a small focused phase between 2B-smoke-complete and the start of 2C (`ask`).
+**When to run:** After phase 2C (`ask` tool) lands so the test can include ask-vs-notify discrimination tasks, OR opportunistically now before 2C starts if we want to lock in the notify policy first. Either ordering works; user's call.

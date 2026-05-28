@@ -11,6 +11,45 @@ async def test_mcp_server_registers_notify_tool():
     assert "notify" in tool_names
 
 
+async def test_mcp_server_advertises_instructions_block():
+    """Per Notify Self-Description Policy (4kxp7qnj): a fresh client should
+    see when-to-use / when-not-to-use guidance in the server's
+    instructions block."""
+    instructions = server.mcp.instructions
+    assert instructions is not None
+    assert "USE the `notify` tool when" in instructions
+    assert "DO NOT use `notify`" in instructions
+    assert "out-of-band" in instructions.lower()
+
+
+async def test_notify_tool_description_leads_with_purpose_not_mechanics():
+    """The docstring on the tool should lead with WHY, then HOW."""
+    tools = await server.mcp.list_tools()
+    notify_tool = next(t for t in tools if t.name == "notify")
+    desc = notify_tool.description or ""
+    # First sentence should be about pinging the user, not about return type
+    first_line = desc.strip().splitlines()[0]
+    assert "out-of-band" in first_line.lower() or "ping" in first_line.lower()
+    # Return-format info should still be present but later
+    assert "sent at" in desc
+    assert "NOTIFY_FAILED" in desc
+
+
+async def test_notify_message_parameter_carries_guidance():
+    """Per Notify Self-Description Policy: the message parameter must have
+    a description telling the agent what shape the payload should take."""
+    tools = await server.mcp.list_tools()
+    notify_tool = next(t for t in tools if t.name == "notify")
+    schema = notify_tool.inputSchema
+    message_prop = schema["properties"]["message"]
+    assert "description" in message_prop
+    desc = message_prop["description"]
+    # The phone-friendly URL-preferred-over-file-path note is the key
+    # mobile-UX guidance; tests assert it stays.
+    assert "URL" in desc
+    assert "mobile" in desc.lower()
+
+
 async def test_notify_tool_delegates_to_daemon_client():
     fake_client = MagicMock()
     fake_client.notify = AsyncMock(return_value="sent at 2026-01-01T00:00:00+00:00")
