@@ -16,6 +16,8 @@ from confer.protocol import (
     NotifyResult,
     HelloOk,
     Message,
+    Status,
+    StatusResult,
     decode,
     encode,
 )
@@ -39,6 +41,7 @@ class Daemon:
         self._transport = transport
         self._clients: dict[str, _Client] = {}
         self._server: asyncio.AbstractServer | None = None
+        self._start_time: float | None = None
 
     async def serve(self, socket_path: Path, pid_file: Path) -> None:
         if await self._another_instance_running(socket_path):
@@ -54,6 +57,7 @@ class Daemon:
         await self._transport.connect()
         await self._transport.wait_for_ready()
 
+        self._start_time = time.time()
         self._server = await asyncio.start_unix_server(
             self._handle_client, path=str(socket_path)
         )
@@ -135,6 +139,21 @@ class Daemon:
             )
             return None
         if isinstance(msg, Bye):
+            return None
+        if isinstance(msg, Status):
+            uptime = (
+                0.0 if self._start_time is None else time.time() - self._start_time
+            )
+            gateway = "ready" if self._transport.is_ready() else "not_ready"
+            await self._send(
+                writer,
+                StatusResult(
+                    request_id=msg.request_id,
+                    uptime_seconds=uptime,
+                    gateway_state=gateway,
+                    clients=sorted(self._clients.keys()),
+                ),
+            )
             return None
         await self._send(
             writer,

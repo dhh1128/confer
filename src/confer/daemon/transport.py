@@ -25,6 +25,9 @@ class DiscordTransport:
     async def wait_for_ready(self) -> None:
         await self._client.wait_until_ready()
 
+    def is_ready(self) -> bool:
+        return self._client.is_ready()
+
     async def _get_dm_channel(self) -> discord.DMChannel:
         if self._dm_channel is not None:
             return self._dm_channel

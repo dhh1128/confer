@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 confer-server = "confer.server:main"
+confer-daemon = "confer.daemon.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

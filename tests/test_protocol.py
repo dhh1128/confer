@@ -8,6 +8,8 @@ from confer.protocol import (
     HelloOk,
     Notify,
     NotifyResult,
+    Status,
+    StatusResult,
     decode,
     encode,
 )
@@ -60,6 +62,21 @@ def test_error_with_request_id_roundtrips():
 
 def test_error_without_request_id_roundtrips():
     msg = Error(code="protocol", message="bad framing")
+    assert _roundtrip(msg) == msg
+
+
+def test_status_roundtrips():
+    msg = Status(request_id="s1")
+    assert _roundtrip(msg) == msg
+
+
+def test_status_result_roundtrips():
+    msg = StatusResult(
+        request_id="s1",
+        uptime_seconds=12.5,
+        gateway_state="ready",
+        clients=["confer/main", "myapp/main#a3f1"],
+    )
     assert _roundtrip(msg) == msg
 
 

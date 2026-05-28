@@ -53,7 +53,24 @@ class Error:
     kind: Literal["ERROR"] = "ERROR"
 
 
-Message = Union[Hello, HelloOk, HelloErr, Notify, NotifyResult, Bye, Error]
+@dataclass(frozen=True)
+class Status:
+    request_id: str
+    kind: Literal["STATUS"] = "STATUS"
+
+
+@dataclass(frozen=True)
+class StatusResult:
+    request_id: str
+    uptime_seconds: float
+    gateway_state: str
+    clients: list[str]
+    kind: Literal["STATUS_RESULT"] = "STATUS_RESULT"
+
+
+Message = Union[
+    Hello, HelloOk, HelloErr, Notify, NotifyResult, Bye, Error, Status, StatusResult
+]
 
 
 _MESSAGE_TYPES: dict[str, type] = {
@@ -64,6 +81,8 @@ _MESSAGE_TYPES: dict[str, type] = {
     "NOTIFY_RESULT": NotifyResult,
     "BYE": Bye,
     "ERROR": Error,
+    "STATUS": Status,
+    "STATUS_RESULT": StatusResult,
 }
 
 

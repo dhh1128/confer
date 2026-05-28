@@ -106,6 +106,13 @@ async def test_wait_for_ready_delegates_to_client():
     transport._client.wait_until_ready.assert_awaited_once_with()
 
 
+def test_is_ready_delegates_to_client():
+    transport = _make_transport_with_mocked_client()
+    transport._client.is_ready = MagicMock(return_value=True)
+    assert transport.is_ready() is True
+    transport._client.is_ready.assert_called_once_with()
+
+
 async def test_close_closes_client_when_no_connect_task():
     transport = _make_transport_with_mocked_client()
     transport._client.close = AsyncMock()

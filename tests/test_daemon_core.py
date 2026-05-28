@@ -11,6 +11,8 @@ from confer.protocol import (
     HelloOk,
     Notify,
     NotifyResult,
+    Status,
+    StatusResult,
     decode,
     encode,
 )
@@ -179,6 +181,47 @@ async def test_client_disconnect_removes_label_from_registry():
     await daemon._handle_client(reader, writer)
 
     assert "confer/main" not in daemon._clients
+
+
+async def test_status_reports_uptime_gateway_state_and_sorted_clients():
+    daemon = _make_daemon()
+    daemon._transport.is_ready = MagicMock(return_value=True)
+    daemon._start_time = 1000.0
+    daemon._clients["zzz"] = _Client(label="zzz", writer=_writer_mock())
+    daemon._clients["aaa"] = _Client(label="aaa", writer=_writer_mock())
+
+    reader = _reader_with([Status(request_id="s1")])
+    writer = _writer_mock()
+
+    import time as _time
+    real_time = _time.time
+    _time.time = lambda: 1005.0
+    try:
+        await daemon._handle_client(reader, writer)
+    finally:
+        _time.time = real_time
+
+    response = _written_messages(writer)[0]
+    assert isinstance(response, StatusResult)
+    assert response.request_id == "s1"
+    assert response.uptime_seconds == 5.0
+    assert response.gateway_state == "ready"
+    assert response.clients == ["aaa", "zzz"]
+
+
+async def test_status_reports_not_ready_when_gateway_not_ready():
+    daemon = _make_daemon()
+    daemon._transport.is_ready = MagicMock(return_value=False)
+    daemon._start_time = None
+
+    reader = _reader_with([Status(request_id="s1")])
+    writer = _writer_mock()
+
+    await daemon._handle_client(reader, writer)
+
+    response = _written_messages(writer)[0]
+    assert response.gateway_state == "not_ready"
+    assert response.uptime_seconds == 0.0
 
 
 def test_make_disambiguator_is_4_lowercase_hex_chars():
