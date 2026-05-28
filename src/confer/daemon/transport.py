@@ -25,7 +25,14 @@ class DiscordTransport:
         self._connect_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
-        self._connect_task = asyncio.create_task(self._client.start(self._token))
+        # login() must complete before wait_until_ready() can be called —
+        # it's where discord.py initializes self._ready. Failures here
+        # (invalid token, network down) propagate immediately with a real
+        # backtrace, rather than getting buried in a background task.
+        await self._client.login(self._token)
+        # connect() runs the Gateway websocket loop and never returns
+        # until the connection is closed, so it must be a background task.
+        self._connect_task = asyncio.create_task(self._client.connect())
         self._connect_task.add_done_callback(self._on_connect_task_done)
 
     @staticmethod

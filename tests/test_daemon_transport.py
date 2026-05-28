@@ -78,23 +78,35 @@ async def test_dm_channel_is_cached_across_calls():
     assert mock_dm_channel.send.await_count == 2
 
 
-async def test_connect_starts_client_in_background_task():
+async def test_connect_logs_in_then_starts_gateway_in_background_task():
     transport = _make_transport_with_mocked_client()
 
     async def never_returns(*args, **kwargs):
         await asyncio.sleep(3600)
 
-    transport._client.start = AsyncMock(side_effect=never_returns)
+    transport._client.login = AsyncMock()
+    transport._client.connect = AsyncMock(side_effect=never_returns)
 
     await transport.connect()
     try:
+        transport._client.login.assert_awaited_once_with("test-token")
         assert transport._connect_task is not None
         assert not transport._connect_task.done()
-        transport._client.start.assert_called_once_with("test-token")
     finally:
         transport._connect_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await transport._connect_task
+
+
+async def test_connect_propagates_login_failure_immediately():
+    """A bad bot token should surface as a real exception at connect()
+    time, not get buried in a fire-and-forget background task."""
+    transport = _make_transport_with_mocked_client()
+    transport._client.login = AsyncMock(side_effect=RuntimeError("LoginFailure"))
+
+    with pytest.raises(RuntimeError, match="LoginFailure"):
+        await transport.connect()
+    assert transport._connect_task is None
 
 
 async def test_wait_for_ready_delegates_to_client():
@@ -118,10 +130,11 @@ async def test_wait_for_ready_raises_clear_error_on_timeout():
         await transport.wait_for_ready(timeout=0.05)
 
 
-async def test_connect_done_callback_logs_exception(caplog):
+async def test_connect_done_callback_logs_gateway_failure(caplog):
     import logging
     transport = _make_transport_with_mocked_client()
-    transport._client.start = AsyncMock(side_effect=RuntimeError("auth failed"))
+    transport._client.login = AsyncMock()
+    transport._client.connect = AsyncMock(side_effect=RuntimeError("gateway dropped"))
 
     with caplog.at_level(logging.ERROR, logger="confer.daemon.transport"):
         await transport.connect()
@@ -136,7 +149,8 @@ async def test_connect_done_callback_logs_exception(caplog):
 async def test_connect_done_callback_silent_on_normal_completion(caplog):
     import logging
     transport = _make_transport_with_mocked_client()
-    transport._client.start = AsyncMock(return_value=None)
+    transport._client.login = AsyncMock()
+    transport._client.connect = AsyncMock(return_value=None)
 
     with caplog.at_level(logging.ERROR, logger="confer.daemon.transport"):
         await transport.connect()
@@ -153,7 +167,8 @@ async def test_connect_done_callback_silent_on_cancel():
     async def long_running(*args, **kwargs):
         await asyncio.sleep(3600)
 
-    transport._client.start = AsyncMock(side_effect=long_running)
+    transport._client.login = AsyncMock()
+    transport._client.connect = AsyncMock(side_effect=long_running)
 
     await transport.connect()
     transport._connect_task.cancel()
