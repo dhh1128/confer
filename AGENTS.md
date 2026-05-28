@@ -46,29 +46,16 @@ export PATH="$PWD/.agent-bin:$PATH"
 ```
 ## Testing Protocol
 
-This repository appears to have no test suite yet. Before writing feature code
-or fixing bugs, propose an appropriate testing framework for this project type
-and add a single trivially-passing test to confirm the setup works. In the
-same commit, propose to change AGENTS.md to replace this instruction with one
-that instructs agents to follow strict TDD from now on: write failing tests
-that capture happy path and edge cases/unhappy paths for each requirement,
-observe them fail, implement until tests pass, never checkin without proving
-that all tests pass, aim for 100% of all new code, and always leave existing
-code better tested than it was before you touched it.
+Strict TDD is in force. For every requirement, write failing tests that
+capture the happy path and the edge / unhappy paths first, observe them
+fail, implement until they pass, and never check in without proving that
+all tests pass. Aim for 100% branch coverage on all new code, and always
+leave existing code better tested than it was before you touched it. The
+project standard is `uv run pytest` (with `--cov-branch --cov-fail-under=100`
+already configured in `pyproject.toml`); a passing run is a gate
+precondition (see `docs/methodology.md` §9).
 
 ## CI and Documentation
-
-This repo has no CI workflows. Until it does, any time you make code
-changes to the user, propose an appropriate set of GitHub actions (e.g.,
-`.github/workflows/ci.yml`) that builds and runs tests on every push and
-pull request. Propose to remove this instruction from AGENTS.md on the
-same commit.
-
-This repository has no README. As long is this is the case, any time you
-make code changes for the user, propose to add a `README.md` that explains how
-to get from a fresh clone to passing tests, with a clickable CI status
-badge at the top for each active workflow. Propose to remove this
-instruction from AGENTS.md on the same commit.
 
 When writing or modifying GitHub Actions workflows, always use the latest
 stable release of each action. Avoid versions pinned to Node.js 16 or
@@ -108,7 +95,8 @@ Adopt this stance toward it:
 
 For the full context of what `.i` files are, the intellectual lineage of this system, what makes
 a `why` field adequate, and what triggers a required `this.i` update, read `docs/methodology.md`
-(or, if none is present, copy it into this repo from `../origin-platform/docs/origin-platform` and then read it).
+(or, if none is present, copy `methodology.md` and `intent-briefing.md` into `docs/` from
+`../origin-platform/docs/` and then read them).
 DO NOT modify code here without understanding the methodology. You should have a clear idea of
 what a "speculative interview" is, how it's done, and where its output is recorded; what a "tension"
 is in intent; how "marks" work; how we use Fowler's _Refactoring_ discipline to continually improve DRY, encapsulation, and names in code.
