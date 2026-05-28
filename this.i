@@ -496,6 +496,44 @@ Confer = goal:
         nx2pj4wq), letting the agent's natural-language reasoning handle both
         outcomes the same way.
 
+    Notify Self-Description Policy = decision:
+      id: 4kxp7qnj
+      why: >
+        Adversarial review by a fresh Claude Code session (recorded as G1 in
+        docs/gaps.md, 2026-05-28) found that confer's MCP self-description
+        was insufficient to guide an agent that lacked prior memory of the
+        project. Specifically: no server-level instructions block,
+        mechanics-first tool docstring with no when-to-use guidance, and
+        zero description on the message parameter. Without these a fresh
+        agent either over-uses notify as a generic "tell the user" channel
+        or under-uses it because the purpose is not apparent from the
+        schema. Resolved by three concrete changes:
+
+        (1) FastMCP is constructed with instructions= containing ~10 lines
+        of when-to-use and when-not-to-use guidance that lands in every
+        client's system prompt.
+
+        (2) notify's docstring is rewritten purpose-first ("Ping the user
+        out-of-band via Discord DM"), referencing the instructions block
+        for detail rather than restating mechanics first.
+
+        (3) The message parameter gets an explicit
+        Annotated[str, Field(description=...)] with a concrete example and
+        a phone-friendly URL-preferred-over-file-path note (daniel reads
+        notifications on mobile where workstation file paths are
+        unreachable).
+
+        Considered an MCP resource confer://usage-guide with long-form
+        policy: deferred as overkill for a one-tool surface — see tension
+        MCP Resource For Usage Guide Pending (7nqxw4pj). Considered
+        renaming notify to a more specific verb (ping_user_offband,
+        dm_user_async, alert_user): deferred because the rename touches
+        the recorded Naming decision (qj4xm7pn) and description-plus-
+        instructions is the cheaper, more direct lever — see tension
+        Notify Tool Name Reconsideration Pending (3pqvn7mw). Post-fix
+        acid test (a clean Claude in a worktree-isolated context given
+        mixed-shape tasks) tracked in gaps.md as G2.
+
     notify Fail Fast = decision:
       id: 3kpwn7mj
       why: >
@@ -722,6 +760,44 @@ Confer = goal:
         could plausibly send oversized lines. Likely fix: catch
         LimitOverrunError / IncompleteReadError in _handle_client, send
         Error(code="bad_message", message="line too long"), close cleanly.
+
+    MCP Resource For Usage Guide Pending = tension:
+      id: 7nqxw4pj
+      nature: >
+        Notify Self-Description Policy (4kxp7qnj) accepts that the server
+        instructions block plus tool and parameter descriptions cover the
+        single notify tool adequately. As ask (phase 2C) and check_messages
+        (phase 2D) land, the cumulative policy surface — reply routing
+        rules, on_timeout fallback modes, when to broadcast vs. dispatch,
+        label-prefix conventions, the empty-personal-guild gotcha — may
+        grow past what fits in ~10 lines of instructions text. An MCP
+        resource confer://usage-guide would house long-form guidance the
+        agent can fetch on demand without bloating every system prompt.
+      revisit-when: >
+        The cumulative confer policy across notify + ask + check_messages
+        exceeds ~15 lines of instruction text, OR a clean-Claude acid test
+        post-2D shows agents misusing ask / check_messages in ways the
+        instructions block did not catch.
+
+    Notify Tool Name Reconsideration Pending = tension:
+      id: 3pqvn7mw
+      nature: >
+        Adversarial review (G1) noted that "notify" connotes generic
+        "log/event" semantics in many programming contexts (Linux
+        notify-send, JavaScript Notification API, syslog, etc.) and may
+        prime an agent to over-use it as a generic "tell the user"
+        channel rather than the deliberate out-of-band ping it is. A more
+        specific name (ping_user_offband, dm_user_async, alert_user) might
+        reduce misuse independent of description quality. Notify
+        Self-Description Policy (4kxp7qnj) defers the rename in favor of
+        fixing description and instructions first, on the theory that a
+        renamed tool with a bad description is still misused but a
+        well-named tool needs less rescuing.
+      revisit-when: >
+        A post-fix acid test (gaps.md G2) shows a fresh Claude misusing
+        notify in ways that better description did not catch, OR daniel
+        observes notify misuse in real multi-agent use over a 2-week
+        window.
 
     Async Polling Loop Flakiness Risk = tension:
       id: 3vxm7qnp
