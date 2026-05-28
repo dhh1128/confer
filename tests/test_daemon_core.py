@@ -1,6 +1,9 @@
 import asyncio
+import errno
 import os
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from confer.daemon.core import Daemon, _Client, _make_disambiguator
 from confer.daemon.transport import FAILURE_PREFIX
@@ -264,15 +267,94 @@ async def test_serve_binds_socket_with_0600_perms_and_writes_pid(tmp_path):
     transport.connect.assert_awaited_once()
     transport.wait_for_ready.assert_awaited_once()
 
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    daemon.stop()
+    await task
 
     transport.close.assert_awaited_once()
     assert not sock.exists()
     assert not pid.exists()
+
+
+async def test_serve_responds_to_signal_via_stop_event(tmp_path):
+    import signal as _signal
+
+    sock = tmp_path / "confer.sock"
+    pid = tmp_path / "confer.pid"
+    transport = MagicMock()
+    transport.connect = AsyncMock()
+    transport.wait_for_ready = AsyncMock()
+    transport.close = AsyncMock()
+    daemon = Daemon(transport=transport)
+
+    task = asyncio.create_task(daemon.serve(sock, pid))
+    for _ in range(200):
+        if sock.exists():
+            break
+        await asyncio.sleep(0.01)
+
+    # Send a real SIGTERM to our own process; the daemon's signal handler
+    # (installed in serve()) should set the stop event and trigger cleanup.
+    os.kill(os.getpid(), _signal.SIGTERM)
+    await task
+    assert not sock.exists()
+    assert not pid.exists()
+
+
+async def test_serve_handles_eaddrinuse_silently_on_bind(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    pid = tmp_path / "confer.pid"
+    transport = MagicMock()
+    transport.connect = AsyncMock()
+    transport.wait_for_ready = AsyncMock()
+    transport.close = AsyncMock()
+    daemon = Daemon(transport=transport)
+
+    def raise_eaddrinuse(*args, **kwargs):
+        raise OSError(errno.EADDRINUSE, "Address in use")
+
+    monkeypatch.setattr(asyncio, "start_unix_server", raise_eaddrinuse)
+
+    # No exception should escape; daemon should clean up and return.
+    await daemon.serve(sock, pid)
+
+    transport.close.assert_awaited_once()
+    assert not pid.exists()
+
+
+async def test_serve_propagates_unexpected_oserror_on_bind(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    pid = tmp_path / "confer.pid"
+    transport = MagicMock()
+    transport.connect = AsyncMock()
+    transport.wait_for_ready = AsyncMock()
+    transport.close = AsyncMock()
+    daemon = Daemon(transport=transport)
+
+    def raise_other(*args, **kwargs):
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(asyncio, "start_unix_server", raise_other)
+
+    with pytest.raises(OSError, match="permission denied"):
+        await daemon.serve(sock, pid)
+
+
+def test_atomic_write_pid_file_replaces_existing(tmp_path):
+    from confer.daemon.core import _atomic_write_pid_file
+
+    pf = tmp_path / "confer.pid"
+    pf.write_text("99999")
+    _atomic_write_pid_file(pf, 12345)
+    assert pf.read_text() == "12345"
+    # No leftover .tmp file
+    assert not pf.with_suffix(pf.suffix + ".tmp").exists()
+
+
+def test_stop_is_noop_when_no_serve_running(tmp_path):
+    transport = MagicMock()
+    daemon = Daemon(transport=transport)
+    # Should not raise; stop is a no-op when _stop_event is None.
+    daemon.stop()
 
 
 async def test_serve_detects_another_running_daemon_and_exits_cleanly(tmp_path):
@@ -327,8 +409,5 @@ async def test_serve_removes_stale_socket_file_and_binds(tmp_path):
 
     assert pid.exists()
 
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    daemon.stop()
+    await task

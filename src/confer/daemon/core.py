@@ -1,7 +1,9 @@
 import asyncio
+import errno
 import hashlib
 import logging
 import os
+import signal
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -36,12 +38,27 @@ def _make_disambiguator(pid: int) -> str:
     return hashlib.sha256(payload).hexdigest()[:4]
 
 
+def _atomic_write_pid_file(pid_path: Path, pid: int) -> None:
+    """Write pid_path atomically via tmpfile + rename, so a crash between
+    socket-bind and PID-file-visible never leaves a working daemon with no
+    PID file."""
+    tmp = pid_path.with_suffix(pid_path.suffix + ".tmp")
+    tmp.write_text(str(pid))
+    tmp.replace(pid_path)
+
+
 class Daemon:
     def __init__(self, transport: DiscordTransport) -> None:
         self._transport = transport
         self._clients: dict[str, _Client] = {}
         self._server: asyncio.AbstractServer | None = None
         self._start_time: float | None = None
+        self._stop_event: asyncio.Event | None = None
+
+    def stop(self) -> None:
+        """Trigger graceful shutdown of a running serve() call."""
+        if self._stop_event is not None:
+            self._stop_event.set()
 
     async def serve(self, socket_path: Path, pid_file: Path) -> None:
         if await self._another_instance_running(socket_path):
@@ -58,23 +75,41 @@ class Daemon:
         await self._transport.wait_for_ready()
 
         self._start_time = time.time()
-        self._server = await asyncio.start_unix_server(
-            self._handle_client, path=str(socket_path)
-        )
+        try:
+            self._server = await asyncio.start_unix_server(
+                self._handle_client, path=str(socket_path)
+            )
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                log.info("lost a race to bind %s; exiting", socket_path)
+                await self._transport.close()
+                return
+            raise
         socket_path.chmod(0o600)
-        pid_file.write_text(str(os.getpid()))
+        _atomic_write_pid_file(pid_file, os.getpid())
         log.info("daemon listening on %s (pid %s)", socket_path, os.getpid())
 
+        self._stop_event = asyncio.Event()
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with suppress(NotImplementedError):
+                loop.add_signal_handler(sig, self._stop_event.set)
+
         try:
-            await self._server.serve_forever()
-        except asyncio.CancelledError:
-            pass
+            await self._stop_event.wait()
         finally:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                with suppress(NotImplementedError, ValueError):
+                    loop.remove_signal_handler(sig)
+            self._server.close()
+            with suppress(Exception):
+                await self._server.wait_closed()
             await self._transport.close()
             with suppress(FileNotFoundError):
                 socket_path.unlink()
             with suppress(FileNotFoundError):
                 pid_file.unlink()
+            self._stop_event = None
 
     async def _another_instance_running(self, socket_path: Path) -> bool:
         if not socket_path.exists():

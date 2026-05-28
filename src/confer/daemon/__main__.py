@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from contextlib import suppress
+from pathlib import Path
 
 from confer.config import Settings
 from confer.daemon.core import Daemon
@@ -46,16 +47,44 @@ def _cmd_run() -> int:
     return 0
 
 
+def _read_live_pid(pid_path) -> int | None:
+    """Return the PID from the file only if it identifies a live
+    confer-daemon process; None otherwise. Guards against stale PID files
+    (after kill -9, OOM, system reboot) where PID reuse could otherwise
+    cause us to signal an unrelated process."""
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text().strip())
+    except ValueError:
+        return None
+    try:
+        cmdline = (
+            Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace"
+            )
+        )
+    except FileNotFoundError:
+        return None
+    if "confer-daemon" not in cmdline:
+        return None
+    return pid
+
+
 def _cmd_stop() -> int:
     pf = pid_file()
-    if not pf.exists():
+    pid = _read_live_pid(pf)
+    if pid is None:
+        if pf.exists():
+            print(
+                f"Stale PID file at {pf} (no live confer-daemon process); "
+                "removing."
+            )
+            with suppress(FileNotFoundError):
+                pf.unlink()
+            return 0
         print(f"No daemon PID file at {pf}; nothing to stop.", file=sys.stderr)
         return 0
-    try:
-        pid = int(pf.read_text().strip())
-    except ValueError:
-        print(f"Malformed PID file at {pf}.", file=sys.stderr)
-        return 1
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -122,14 +151,16 @@ def _print_status(pid: int, result: StatusResult) -> None:
 
 def _cmd_status() -> int:
     pf = pid_file()
-    if not pf.exists():
+    pid = _read_live_pid(pf)
+    if pid is None:
+        if pf.exists():
+            print(
+                f"Stale PID file at {pf} (no live confer-daemon process); "
+                "daemon is not running."
+            )
+            return 0
         print(f"No daemon running (no PID file at {pf}).")
         return 0
-    try:
-        pid = int(pf.read_text().strip())
-    except ValueError:
-        print(f"Malformed PID file at {pf}.", file=sys.stderr)
-        return 1
     result = asyncio.run(_query_status())
     if result is None:
         print(

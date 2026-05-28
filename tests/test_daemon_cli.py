@@ -66,71 +66,144 @@ def test_configure_logging_creates_directory(paths):
     assert paths["log"].parent.exists()
 
 
+def _stub_live_pid(monkeypatch, pid: int) -> None:
+    """Make _read_live_pid return the given PID regardless of /proc state."""
+    monkeypatch.setattr(cli, "_read_live_pid", lambda _pf: pid)
+
+
+# ───── _read_live_pid ──────────────────────────────────────────────────────
+
+def test_read_live_pid_returns_pid_for_running_confer_daemon_process(tmp_path, monkeypatch):
+    pf = tmp_path / "confer.pid"
+    pf.write_text(str(os.getpid()))
+    # Fake /proc/<pid>/cmdline lookup
+    fake_cmdline = b"confer-daemon\x00"
+    monkeypatch.setattr(
+        cli.Path, "read_bytes", lambda self: fake_cmdline if "cmdline" in str(self) else b""
+    )
+    assert cli._read_live_pid(pf) == os.getpid()
+
+
+def test_read_live_pid_returns_none_when_file_missing(tmp_path):
+    assert cli._read_live_pid(tmp_path / "absent.pid") is None
+
+
+def test_read_live_pid_returns_none_when_pid_malformed(tmp_path):
+    pf = tmp_path / "confer.pid"
+    pf.write_text("not a number")
+    assert cli._read_live_pid(pf) is None
+
+
+def test_read_live_pid_returns_none_when_proc_entry_missing(tmp_path, monkeypatch):
+    pf = tmp_path / "confer.pid"
+    pf.write_text("99999")
+
+    def raise_fnfe(self):
+        raise FileNotFoundError(str(self))
+
+    monkeypatch.setattr(cli.Path, "read_bytes", raise_fnfe)
+    assert cli._read_live_pid(pf) is None
+
+
+def test_read_live_pid_returns_none_when_cmdline_is_a_different_program(tmp_path, monkeypatch):
+    pf = tmp_path / "confer.pid"
+    pf.write_text(str(os.getpid()))
+    monkeypatch.setattr(cli.Path, "read_bytes", lambda self: b"vim\x00main.py\x00")
+    assert cli._read_live_pid(pf) is None
+
+
+# ───── _cmd_stop ───────────────────────────────────────────────────────────
+
 def test_cmd_stop_returns_0_when_no_pid_file(paths, capsys):
     assert cli._cmd_stop() == 0
     err = capsys.readouterr().err
     assert "nothing to stop" in err
 
 
-def test_cmd_stop_returns_1_on_malformed_pid_file(paths, capsys):
+def test_cmd_stop_treats_malformed_pid_file_as_stale_and_removes_it(paths, capsys):
     paths["pid"].write_text("not a number")
-    assert cli._cmd_stop() == 1
-    assert "Malformed" in capsys.readouterr().err
-
-
-def test_cmd_stop_returns_0_when_process_does_not_exist(paths, capsys):
-    paths["pid"].write_text("99999")
-    with patch.object(cli.os, "kill", side_effect=ProcessLookupError):
-        assert cli._cmd_stop() == 0
+    assert cli._cmd_stop() == 0
     out = capsys.readouterr().out
-    assert "stale" in out
+    assert "Stale PID file" in out
     assert not paths["pid"].exists()
 
 
-def test_cmd_stop_returns_0_when_daemon_exits_cleanly(paths, capsys):
-    paths["pid"].write_text("12345")
-    call_count = {"n": 0}
+def test_cmd_stop_treats_dead_pid_as_stale_and_removes_pid_file(paths, capsys, monkeypatch):
+    paths["pid"].write_text("99999")
+    # _read_live_pid returns None because /proc/99999 doesn't exist
+    assert cli._cmd_stop() == 0
+    out = capsys.readouterr().out
+    assert "Stale PID file" in out
+    assert not paths["pid"].exists()
 
-    def fake_sleep(_):
-        call_count["n"] += 1
-        if call_count["n"] >= 2:
+
+def test_cmd_stop_handles_kill_process_lookup_error(paths, capsys, monkeypatch):
+    paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
+    with patch.object(cli.os, "kill", side_effect=ProcessLookupError):
+        assert cli._cmd_stop() == 0
+    out = capsys.readouterr().out
+    assert "stale" in out.lower()
+    assert not paths["pid"].exists()
+
+
+def test_cmd_stop_returns_0_when_daemon_exits_cleanly(paths, capsys, monkeypatch):
+    paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
+    sleep_counter = {"n": 0}
+
+    def stop_after_two_polls(_):
+        sleep_counter["n"] += 1
+        if sleep_counter["n"] >= 2:
             paths["pid"].unlink()
 
     with patch.object(cli.os, "kill") as mock_kill, patch.object(
-        cli.time, "sleep", side_effect=fake_sleep
+        cli.time, "sleep", side_effect=stop_after_two_polls
     ):
         assert cli._cmd_stop() == 0
     mock_kill.assert_called_once_with(12345, signal.SIGTERM)
     assert "stopped" in capsys.readouterr().out
 
 
-def test_cmd_stop_returns_1_when_daemon_does_not_exit(paths, capsys):
+def test_cmd_stop_returns_1_when_daemon_does_not_exit(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
     with patch.object(cli.os, "kill"), patch.object(cli.time, "sleep"):
         assert cli._cmd_stop() == 1
     assert "did not exit" in capsys.readouterr().err
 
+
+# ───── _cmd_status ─────────────────────────────────────────────────────────
 
 def test_cmd_status_returns_0_when_no_pid_file(paths, capsys):
     assert cli._cmd_status() == 0
     assert "No daemon running" in capsys.readouterr().out
 
 
-def test_cmd_status_returns_1_on_malformed_pid_file(paths, capsys):
+def test_cmd_status_treats_malformed_pid_file_as_stale(paths, capsys):
     paths["pid"].write_text("xxx")
-    assert cli._cmd_status() == 1
-    assert "Malformed" in capsys.readouterr().err
+    assert cli._cmd_status() == 0
+    out = capsys.readouterr().out
+    assert "Stale PID file" in out
 
 
-def test_cmd_status_returns_1_when_daemon_does_not_respond(paths, capsys):
+def test_cmd_status_treats_dead_pid_as_stale(paths, capsys):
+    paths["pid"].write_text("99999")
+    assert cli._cmd_status() == 0
+    assert "Stale PID file" in capsys.readouterr().out
+
+
+def test_cmd_status_returns_1_when_daemon_does_not_respond(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
     with patch.object(cli.asyncio, "run", return_value=None):
         assert cli._cmd_status() == 1
     assert "did not respond" in capsys.readouterr().err
 
 
-def test_cmd_status_prints_state_and_log_tail(paths, capsys):
+def test_cmd_status_prints_state_and_log_tail(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
     paths["log"].write_text("line one\nline two\nline three\n")
     result = StatusResult(
         request_id="status",
@@ -149,8 +222,9 @@ def test_cmd_status_prints_state_and_log_tail(paths, capsys):
     assert "line two" in out
 
 
-def test_cmd_status_omits_log_section_when_log_file_missing(paths, capsys):
+def test_cmd_status_omits_log_section_when_log_file_missing(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
+    _stub_live_pid(monkeypatch, 12345)
     result = StatusResult(
         request_id="status",
         uptime_seconds=0.5,
