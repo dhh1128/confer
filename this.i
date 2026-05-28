@@ -129,7 +129,10 @@ Confer = goal:
         makes ask of any duration free of reconnection overhead. Tradeoff:
         if the MCP server process dies mid-ask, the connection closes and
         the pending reply has nowhere to go — see tension
-        Pending Ask Lost On MCP Server Death.
+        Pending Ask Lost On MCP Server Death. (The Gateway connection now
+        lives in the daemon per Central Daemon Architecture, dq7n3xpk; this
+        decision still describes the connection model, but its owning
+        process changed.)
 
     Bot Token In .env = decision:
       id: pq3xnk5m
@@ -142,7 +145,10 @@ Confer = goal:
         a single-user personal tool. Considered shell env only: fragile —
         easy to forget when restarting the agent client. .env is the Python
         ecosystem default and survives shell restarts. (Library choice
-        refined in Settings Via Pydantic Settings, 5qx2wkpn.)
+        refined in Settings Via Pydantic Settings, 5qx2wkpn. SUPERSEDED in
+        phase 2B by Global Config In ~/.config/confer/config.toml, hq7x3npm:
+        the daemon is a global singleton, so per-project credentials no
+        longer make sense.)
 
     Settings Via Pydantic Settings = decision:
       id: 5qx2wkpn
@@ -161,7 +167,11 @@ Confer = goal:
         (CONFER_USER_ID parsed as int), and a self-documenting Settings class
         as the single source of truth for all configuration. The pydantic v2
         dependency (~3 MB) is acceptable for the value provided and pays off
-        more as configuration grows.
+        more as configuration grows. (SUPERSEDED in phase 2B by Global
+        Config In ~/.config/confer/config.toml, hq7x3npm: with only one
+        config-loading site in the daemon, stdlib tomllib + a dataclass is
+        sufficient validation, and pydantic-settings is dropped from runtime
+        deps.)
 
     DiscordTransport Class = decision:
       id: b6npq7wm
@@ -178,6 +188,10 @@ Confer = goal:
         one. Composition (DiscordTransport holds a discord.py Client
         internally and exposes only our intended methods) gives a single mock
         seam for unit tests and a clean place for transport-level state.
+        (Class itself unchanged in phase 2B; relocated to the confer.daemon
+        subpackage as part of the daemon split per Central Daemon
+        Architecture, dq7n3xpk. The MCP server no longer constructs one
+        directly — it talks to the daemon over IPC.)
 
     Init Blocks On Gateway Ready = decision:
       id: 4vfnx7pq
@@ -196,7 +210,11 @@ Confer = goal:
         connection-failure surface in one expected place (server startup) and
         lets tool implementations be straight-line. Acceptable cost: ~1-3s
         startup delay (typical Discord Gateway connect + ready time), well
-        inside any plausible MCP-protocol startup tolerance.
+        inside any plausible MCP-protocol startup tolerance. (In phase 2B
+        this applies to daemon startup; the MCP server's lifespan now blocks
+        on daemon-ready, which in turn blocks on Gateway-ready. First-agent-
+        after-reboot pays daemon-spawn + Gateway-connect; subsequent agents
+        see no Gateway-connect latency at all.)
 
     DM Channel Lazy Cached = decision:
       id: gjw3pq7n
@@ -212,6 +230,151 @@ Confer = goal:
         and per-call latency for no benefit. Lazy+cache surfaces user-id
         misconfiguration on the first notify (clear failure sentinel return)
         without paying per-call fetch cost.
+
+    # ─── DAEMON ARCHITECTURE ─────────────────────────────────────────────────
+
+    Central Daemon Architecture = decision:
+      id: dq7n3xpk
+      why: >
+        All Discord interaction is centralized in a long-lived daemon process
+        (confer-daemon); per-session MCP servers become thin IPC shims that
+        talk to the daemon over a Unix socket. Considered keeping the original
+        design (one Discord Gateway connection per MCP server, recorded in
+        Persistent Gateway Connection, bn4qj7wc): broke down the moment daniel
+        confirmed the multi-agent reality — dozens of Claude Code sessions per
+        day, often concurrent, each spawning its own stdio MCP servers. Discord
+        disconnects duplicate Gateway sessions for the same bot token, so
+        concurrent MCP servers would fight for the Gateway. Considered the
+        one-bot-per-agent workaround (Direction 1 in design discussion): daniel
+        explicitly rejected it as unscalable past ~5-10 bots, when dozens of
+        ephemeral sessions per day are the norm. The daemon multiplexes one
+        Gateway connection across all connected MCP servers, holds pending-ask
+        and check_messages state across MCP-server churn, and dispatches user
+        replies to the right agent by label. This incidentally resolves the
+        tensions Pending Ask Lost On MCP Server Death (3nx7pq4m) and Proactive
+        Messages Lost On Restart (4pjq7vmx). Tradeoff: meaningfully more code
+        (IPC protocol, daemon lifecycle, socket server, dispatcher) and a new
+        single point of failure recorded as tension Daemon Death Loses Pending
+        State (nq7pxw4m).
+
+    Auto-Spawn From MCP Server = decision:
+      id: 7xj4mvqn
+      why: >
+        Each MCP server's lifespan handler first attempts to connect to the
+        daemon's Unix socket; on failure (socket missing, connection refused,
+        or stale socket file), it spawns confer-daemon via
+        subprocess.Popen(start_new_session=True) with stdout/stderr redirected
+        to the daemon log file, then polls the socket for up to 10s waiting for
+        the daemon to bind and report ready. Considered requiring the user to
+        start the daemon manually (or via systemd --user): adds operational
+        burden that daniel will inevitably forget given the pace of opening new
+        sessions; the failure mode (every new agent silently broken until
+        daemon is started) is hostile. Considered shipping a systemd unit file:
+        defers the first-agent-after-reboot latency to login time, but adds
+        platform coupling and setup friction; deferred until practice shows
+        the ~3-4s first-agent cost (daemon Python import + Gateway connect) is
+        actually annoying. Race protection across concurrent auto-spawns is
+        free; see Singleton Via Socket Bind (bm4vpx7q).
+
+    Singleton Via Socket Bind = decision:
+      id: bm4vpx7q
+      why: >
+        Daemon-singleton enforcement uses the socket bind itself as the lock,
+        not a separate PID-file lock. Startup sequence: (1) if the socket file
+        already exists, attempt to connect; (2) connect succeeds → another
+        daemon is running, exit 0 silently; (3) connect fails → unlink the
+        stale socket file; (4) bind the socket with 0600 perms; (5) if bind
+        fails with EADDRINUSE (lost a race against another concurrent
+        starter), exit 0 silently. A PID file at ${XDG_RUNTIME_DIR}/confer.pid
+        is written after successful bind, but only for the benefit of the
+        `confer-daemon stop` and `status` subcommands — the socket bind is the
+        actual mutual-exclusion mechanism. Considered a fcntl-based file lock
+        on a separate pidfile: equivalent semantically but adds a second
+        critical section to reason about. Socket-bind-as-lock means the
+        critical section IS the thing that lets clients connect, which is the
+        right level of indivisibility.
+
+    IPC Protocol NDJSON Over Persistent Unix Socket = decision:
+      id: kp5w2nfx
+      why: >
+        IPC framing is newline-delimited JSON (NDJSON) over a Unix socket at
+        ${XDG_RUNTIME_DIR}/confer.sock (fallback
+        ${XDG_STATE_HOME:-$HOME/.local/state}/confer/confer.sock), with the
+        socket owned 0600 by the user. File permissions ARE the access control
+        on a single-user system — no in-band auth token needed. Each MCP
+        server holds one persistent bidirectional connection for its lifetime;
+        either side can send at any time. MCP-server-initiated commands carry
+        a UUID4 request_id; the daemon's response (or any daemon-pushed event
+        derived from that command, e.g., an ASK_REPLY arriving from Discord
+        for an outstanding ASK_BEGIN) echoes the same id so the MCP server's
+        awaiter matches. Considered length-prefixed JSON: tighter wire format
+        but more parsing code for no real benefit at this scale. Considered
+        JSON-RPC 2.0: a thoughtful standard but adds notification/error
+        ceremony we don't need. Considered MessagePack or protobuf: binary
+        formats, debugging-hostile, overkill for human-volume traffic.
+        Considered per-request short-lived connections: simpler semantically
+        but precludes daemon-pushed events (ASK_REPLY, broadcast
+        CHECK_MESSAGES). NDJSON over a persistent bidirectional connection is
+        the standard pragmatic shape for single-host IPC in async Python.
+
+    Global Config In ~/.config/confer/config.toml = decision:
+      id: hq7x3npm
+      why: >
+        Daemon configuration moves from per-project .env to a user-global TOML
+        file at ~/.config/confer/config.toml (XDG-conformant), loaded with
+        stdlib tomllib. Required fields: discord_bot_token, confer_user_id.
+        Supersedes Bot Token In .env (pq3xnk5m) and Settings Via Pydantic
+        Settings (5qx2wkpn) — both were correct under the old per-MCP-server
+        architecture where each process owned its own Discord Gateway
+        connection and lived in a specific project directory. With the daemon
+        being a global singleton serving agents across all projects with one
+        bot identity, per-project credentials make no sense. TOML chosen over
+        JSON for human-editability (no missing-comma headaches when daniel
+        edits the file by hand) and over YAML for stdlib availability
+        (tomllib is stdlib in Python 3.11+; PyYAML would be an external dep).
+        pydantic-settings is dropped from runtime dependencies — there is now
+        only one config-loading site (the daemon), and a small dataclass over
+        tomllib.load is enough validation. .env in the repo no longer holds
+        secrets; .env.example becomes obsolete and is removed.
+
+    Auto-Derived Agent Labels = decision:
+      id: gj7wnq4p
+      why: >
+        Each MCP server's identity is auto-derived at startup as
+        {repo}/{branch}[#{disambiguator}] with no per-session configuration
+        required: repo = basename of `git rev-parse --show-toplevel` (or
+        basename of cwd if not a git repo); branch = current git branch (or
+        the literal string 'detached' if on a detached HEAD); disambiguator
+        = first 4 hex chars of hash(pid, start_timestamp_ns), appended only
+        when the daemon detects a collision with another already-connected
+        MCP server. The MCP server sends its preferred label in HELLO; the
+        daemon assigns the final label (appending the disambiguator if needed)
+        and returns it via HELLO_OK. Considered requiring an explicit
+        CONFER_AGENT_LABEL env var: too much per-session friction at daniel's
+        pace of opening dozens of sessions per day. Considered using PID alone:
+        meaningful to the daemon but useless to the human reading Discord.
+        Considered MCP-protocol-derived agent name (client name from MCP
+        initialize): partially useful but doesn't distinguish concurrent
+        sessions of the same client.
+
+    Daemon CLI run stop status = decision:
+      id: 5jpxnq7w
+      why: >
+        confer-daemon exposes three subcommands. Bare invocation
+        (`confer-daemon`) runs the daemon in the foreground — used by the
+        auto-spawn path with stdout/stderr piped to
+        ~/.local/state/confer/daemon.log via RotatingFileHandler (10MB, keep
+        3 archives). `confer-daemon stop` reads the PID file at
+        ${XDG_RUNTIME_DIR}/confer.pid, sends SIGTERM, waits up to 5s for
+        clean shutdown. `confer-daemon status` reports PID, uptime, Discord
+        Gateway state (connected/disconnected/reconnecting), connected MCP
+        servers and their assigned labels, count of pending asks, count of
+        queued check_messages, and the last 20 log lines. Daemon never
+        auto-shuts down — idle-timeout was considered and rejected because
+        the first-agent-after-shutdown latency (Gateway reconnect ~2-3s) is
+        more annoying than the ~50MB idle RAM cost of just running. An
+        explicit `confer-daemon stop` exists for clean termination when the
+        user wants it (e.g., before upgrade or reboot).
 
     # ─── TOOL SURFACE ────────────────────────────────────────────────────────
 
@@ -330,6 +493,51 @@ Confer = goal:
         experience shows transient failures are common and agents do not
         retry well in practice, this decision is cheap to revisit.
 
+    Reply Routing Rules = decision:
+      id: 7kxpvnqj
+      why: >
+        With Central Daemon Architecture (dq7n3xpk) and multiple concurrent
+        MCP servers, the daemon must route user DMs to the right pending ask.
+        Rules, applied in order:
+
+        (1) Parse the first whitespace/punctuation-bounded token of the
+            message. Treat it, case-insensitively, with hyphens and spaces
+            interchangeable in the match, as a prefix. If it is a unique
+            substring of an active label, route the rest of the message to
+            that label's pending ask (if any) or to that label's
+            check_messages queue (otherwise).
+
+        (2) Reserved tokens '1', '2', '3', ... are number shortcuts: index
+            (1-based) into the list of pending asks ordered newest-first.
+
+        (3) When there is exactly one pending ask across all connected MCP
+            servers, no prefix is required — the entire message is the reply
+            (preserves the next-message-wins ergonomics of vk3qn7fp for the
+            single-agent case).
+
+        (4) When there are zero pending asks anywhere, the message is
+            broadcast — every connected MCP server's check_messages queue
+            receives it (supports interruptions like "stop, requirements
+            changed").
+
+        (5) When there are multiple pending asks and the user supplies an
+            ambiguous or absent prefix, the bot DMs back a numbered list of
+            pending asks ("Multiple asks waiting: [1] confer/feat-ask: ...,
+            [2] myapp/main#a3f1: ...; reply with '1', '2', or a label
+            prefix") and the original message is dropped. The user must
+            re-send with disambiguation.
+
+        Every ASK message includes a footer the bot appends — "(reply:
+        feat-ask, 1, or just answer if I am the only one waiting)" — so
+        daniel never has to memorize or look up labels. Considered Discord's
+        native reply-to-message feature for routing: unambiguous but adds a
+        mobile tap, fighting the dictation use case for the same reasons it
+        was rejected in Next Message Wins For Reply (vk3qn7fp). Considered
+        per-agent DM channels (one bot per agent): rejected as unscalable
+        when daniel runs dozens of sessions per day. Reply Disambiguation
+        When Proactive Arrives Mid-Ask (rk2nq7pm) remains open in the
+        multi-agent context.
+
     # ─── NAMING ──────────────────────────────────────────────────────────────
 
     Naming = decision:
@@ -372,10 +580,19 @@ Confer = goal:
         reduced to a thin IPC shim — meaningfully more code and an operational
         footprint (user must keep a daemon running, likely under systemd
         --user or similar). For v1, accepted as a known gap.
-      revisit-when: >
-        confer is in regular use AND pending-ask loss has happened at least
-        three times, OR the MCP standard / Claude Code adds session-persistence
-        such that MCP servers can survive client restarts.
+      resolution: >
+        Resolved by Central Daemon Architecture (dq7n3xpk). The daemon now
+        outlives any individual MCP server; pending ask state is held in the
+        daemon. When the originating MCP server dies, the ask remains pending
+        in the daemon. If the user replies after the MCP server is gone, the
+        daemon either (a) delivers the reply via check_messages to the next
+        MCP server that connects with the same agent label, OR (b) drops the
+        reply if no such MCP server returns within a retention window
+        (default 1 hour, revisitable). The replacement failure mode — the
+        DAEMON dying — is the lesser one (one long-lived process to monitor
+        vs. dozens of ephemeral ones) and is captured separately as
+        Daemon Death Loses Pending State (nq7pxw4m).
+      resolved-by: dh, 2026-05-28
 
     Proactive Messages Lost On Restart = tension:
       id: 4pjq7vmx
@@ -387,10 +604,14 @@ Confer = goal:
         check_messages contract fuzzy across restarts. For v1, accepted
         because MCP server restarts are infrequent and daniel can re-send if
         a particular proactive message matters.
-      revisit-when: >
-        A proactive message that mattered has been lost to a restart at least
-        once, OR confer is in use across long multi-session workflows where
-        the loss surfaces as a recurring annoyance.
+      resolution: >
+        Resolved by Central Daemon Architecture (dq7n3xpk). check_messages
+        queues are now daemon-resident, indexed by agent label. MCP server
+        restarts no longer lose the cursor — the daemon outlives them. The
+        remaining failure case (daemon itself dies before any MCP server has
+        dequeued) is captured as Daemon Death Loses Pending State
+        (nq7pxw4m).
+      resolved-by: dh, 2026-05-28
 
     Reply Disambiguation When Proactive Arrives Mid-Ask = tension:
       id: rk2nq7pm
@@ -410,3 +631,27 @@ Confer = goal:
         use, OR a Discord mobile UX signal emerges that lets the user mark
         "this is the reply" without adding friction (e.g., a long-press
         gesture or a single-tap reply-mode toggle).
+
+    Daemon Death Loses Pending State = tension:
+      id: nq7pxw4m
+      nature: >
+        With Central Daemon Architecture (dq7n3xpk), the daemon process is
+        the single point of failure for all in-flight ask state and all
+        unread check_messages queues. If the daemon crashes (segfault, OOM,
+        SIGKILL, system reboot without graceful shutdown), every pending ask
+        across all connected MCP servers is lost; every queued unread
+        message is lost. This is strictly better than the per-MCP-server
+        failure mode it replaces (Pending Ask Lost On MCP Server Death,
+        3nx7pq4m, now resolved) — one long-lived process is monitorable in a
+        way that dozens of ephemeral ones are not — but is still a real loss
+        surface. For v1, accepted with no persistence layer; recovery is
+        manual (user notices the daemon died, restarts it via auto-spawn on
+        the next MCP server invocation, re-sends any in-flight asks).
+      revisit-when: >
+        A daemon-death event has actually cost real work at least once, OR
+        the project is being used heavily enough that periodic daemon
+        restarts (e.g., for upgrades) cause visible friction. The likely fix
+        when revisited: a small SQLite-backed state file in
+        ${XDG_STATE_HOME:-$HOME/.local/state}/confer/state.db that the
+        daemon writes-through on every state change and reads on startup to
+        recover.
