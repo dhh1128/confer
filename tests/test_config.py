@@ -26,11 +26,13 @@ def test_load_uses_default_path_when_none_given(monkeypatch, tmp_path):
     assert s.discord_bot_token == "x"
 
 
-def test_load_raises_when_file_missing(tmp_path):
+def test_load_raises_with_helpful_message_when_file_missing(tmp_path):
     missing = tmp_path / "absent.toml"
     with pytest.raises(FileNotFoundError) as exc_info:
         Settings.load(missing)
-    assert str(missing) in str(exc_info.value)
+    msg = str(exc_info.value)
+    assert str(missing) in msg
+    assert "config.toml.example" in msg
 
 
 def test_load_raises_clear_error_on_missing_required_key(tmp_path):

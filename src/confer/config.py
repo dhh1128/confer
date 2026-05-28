@@ -15,8 +15,15 @@ class Settings:
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
         path = path if path is not None else default_config_path()
-        with path.open("rb") as f:
-            data = tomllib.load(f)
+        try:
+            with path.open("rb") as f:
+                data = tomllib.load(f)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"Config file not found at {path}. "
+                f"Copy config.toml.example from the confer repo to {path}, "
+                f"chmod 600 it, and fill in your bot token and Discord user ID."
+            ) from e
         try:
             return cls(
                 discord_bot_token=data["discord_bot_token"],

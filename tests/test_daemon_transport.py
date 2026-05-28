@@ -106,6 +106,63 @@ async def test_wait_for_ready_delegates_to_client():
     transport._client.wait_until_ready.assert_awaited_once_with()
 
 
+async def test_wait_for_ready_raises_clear_error_on_timeout():
+    transport = _make_transport_with_mocked_client()
+
+    async def never_ready():
+        await asyncio.sleep(3600)
+
+    transport._client.wait_until_ready = AsyncMock(side_effect=never_ready)
+
+    with pytest.raises(TimeoutError, match="Gateway did not become ready"):
+        await transport.wait_for_ready(timeout=0.05)
+
+
+async def test_connect_done_callback_logs_exception(caplog):
+    import logging
+    transport = _make_transport_with_mocked_client()
+    transport._client.start = AsyncMock(side_effect=RuntimeError("auth failed"))
+
+    with caplog.at_level(logging.ERROR, logger="confer.daemon.transport"):
+        await transport.connect()
+        with pytest.raises(RuntimeError):
+            await transport._connect_task
+    assert any(
+        "Gateway task ended with exception" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_connect_done_callback_silent_on_normal_completion(caplog):
+    import logging
+    transport = _make_transport_with_mocked_client()
+    transport._client.start = AsyncMock(return_value=None)
+
+    with caplog.at_level(logging.ERROR, logger="confer.daemon.transport"):
+        await transport.connect()
+        await transport._connect_task
+    assert not any(
+        "Gateway task ended with exception" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_connect_done_callback_silent_on_cancel():
+    transport = _make_transport_with_mocked_client()
+
+    async def long_running(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    transport._client.start = AsyncMock(side_effect=long_running)
+
+    await transport.connect()
+    transport._connect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await transport._connect_task
+    # No assertion needed; the test verifies the callback doesn't raise on
+    # cancellation (it would surface as an unhandled exception in the loop).
+
+
 def test_is_ready_delegates_to_client():
     transport = _make_transport_with_mocked_client()
     transport._client.is_ready = MagicMock(return_value=True)

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import discord
@@ -7,6 +8,10 @@ import discord
 SUCCESS_PREFIX = "sent at "
 FAILURE_PREFIX = "<NOTIFY_FAILED: "
 FAILURE_SUFFIX = ">"
+
+_READY_TIMEOUT_SECONDS = 30.0
+
+log = logging.getLogger(__name__)
 
 
 class DiscordTransport:
@@ -21,9 +26,24 @@ class DiscordTransport:
 
     async def connect(self) -> None:
         self._connect_task = asyncio.create_task(self._client.start(self._token))
+        self._connect_task.add_done_callback(self._on_connect_task_done)
 
-    async def wait_for_ready(self) -> None:
-        await self._client.wait_until_ready()
+    @staticmethod
+    def _on_connect_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("Discord Gateway task ended with exception: %r", exc)
+
+    async def wait_for_ready(self, timeout: float = _READY_TIMEOUT_SECONDS) -> None:
+        try:
+            await asyncio.wait_for(self._client.wait_until_ready(), timeout=timeout)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"Discord Gateway did not become ready within {timeout}s; "
+                f"check bot token validity and network connectivity"
+            ) from e
 
     def is_ready(self) -> bool:
         return self._client.is_ready()
