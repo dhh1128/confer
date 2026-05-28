@@ -404,8 +404,15 @@ async def test_close_swallows_reader_task_exception():
     async def raises():
         raise RuntimeError("boom")
 
-    c._reader_task = asyncio.create_task(raises())
-    await asyncio.sleep(0)
+    task = asyncio.create_task(raises())
+    c._reader_task = task
+
+    # Explicitly let the task complete with its exception before close()
+    # runs — clearer than the previous `await asyncio.sleep(0)` which
+    # depended on event-loop scheduling.
+    with pytest.raises(RuntimeError):
+        await task
+
     await c.close()
 
 

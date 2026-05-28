@@ -235,7 +235,7 @@ async def test_client_disconnect_removes_label_from_registry():
     assert "confer/main" not in daemon._clients
 
 
-async def test_status_reports_uptime_gateway_state_and_sorted_clients():
+async def test_status_reports_uptime_gateway_state_and_sorted_clients(monkeypatch):
     daemon = _make_daemon()
     daemon._transport.is_ready = MagicMock(return_value=True)
     daemon._start_time = 1000.0
@@ -245,13 +245,11 @@ async def test_status_reports_uptime_gateway_state_and_sorted_clients():
     reader = _reader_with([Status(request_id="s1")])
     writer = _writer_mock()
 
-    import time as _time
-    real_time = _time.time
-    _time.time = lambda: 1005.0
-    try:
-        await daemon._handle_client(reader, writer)
-    finally:
-        _time.time = real_time
+    # Use monkeypatch (auto-reverts on test exit) instead of manual save/
+    # restore of a module attribute (would leak if an exception fired
+    # before the try block).
+    monkeypatch.setattr("confer.daemon.core.time.time", lambda: 1005.0)
+    await daemon._handle_client(reader, writer)
 
     response = _written_messages(writer)[0]
     assert isinstance(response, StatusResult)

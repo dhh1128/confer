@@ -9,15 +9,13 @@ from confer.daemon import __main__ as cli
 from confer.protocol import Error, Hello, StatusResult, encode
 
 
-@pytest.fixture
-def paths(tmp_path, monkeypatch):
-    pid = tmp_path / "confer.pid"
-    sock = tmp_path / "confer.sock"
-    log = tmp_path / "daemon.log"
-    monkeypatch.setattr(cli, "pid_file", lambda: pid)
-    monkeypatch.setattr(cli, "socket_path", lambda: sock)
-    monkeypatch.setattr(cli, "log_file", lambda: log)
-    return {"pid": pid, "sock": sock, "log": log}
+def fake_async_run(result):
+    """Mock for asyncio.run that closes the passed-in coroutine cleanly
+    (no RuntimeWarning) and returns the given result."""
+    def _fake(coro):
+        coro.close()
+        return result
+    return _fake
 
 
 def test_main_no_subcommand_runs_daemon():
@@ -39,25 +37,34 @@ def test_main_status_subcommand():
 
 
 def test_cmd_run_configures_logging_and_runs_daemon(paths):
+    """asyncio.run is mocked via fake_async_run so the coroutine returned
+    by _run_daemon() is closed cleanly (no RuntimeWarning)."""
     with patch.object(cli, "_configure_logging") as mock_cfg, patch.object(
-        cli.asyncio, "run"
+        cli.asyncio, "run", side_effect=fake_async_run(None)
     ) as mock_run:
         assert cli._cmd_run() == 0
     mock_cfg.assert_called_once()
     mock_run.assert_called_once()
 
 
-async def test_run_daemon_loads_settings_constructs_transport_and_serves(paths):
-    fake_settings = MagicMock(discord_bot_token="tok", confer_user_id=42)
+async def test_run_daemon_loads_settings_and_wires_token_into_transport(paths):
+    """Asserts that Settings fields flow through to DiscordTransport so a
+    field rename in Settings would surface as a test failure (S9)."""
+    fake_settings = MagicMock(discord_bot_token="real-tok", confer_user_id=98765)
     fake_transport = MagicMock()
     fake_daemon = MagicMock()
     fake_daemon.serve = AsyncMock()
 
-    with patch.object(cli.Settings, "load", return_value=fake_settings), patch.object(
+    with patch.object(
+        cli.Settings, "load", return_value=fake_settings
+    ), patch.object(
         cli, "DiscordTransport", return_value=fake_transport
-    ), patch.object(cli, "Daemon", return_value=fake_daemon):
+    ) as mock_transport_cls, patch.object(cli, "Daemon", return_value=fake_daemon):
         await cli._run_daemon()
 
+    mock_transport_cls.assert_called_once_with(
+        token="real-tok", user_id=98765
+    )
     fake_daemon.serve.assert_awaited_once_with(paths["sock"], paths["pid"])
 
 
@@ -148,17 +155,16 @@ def test_cmd_stop_handles_kill_process_lookup_error(paths, capsys, monkeypatch):
 
 
 def test_cmd_stop_returns_0_when_daemon_exits_cleanly(paths, capsys, monkeypatch):
+    """The daemon's finally: clause removes the PID file on shutdown.
+    We simulate that by removing it pre-emptively, so the polling loop
+    sees the file gone regardless of internal poll/sleep order — robust
+    to refactoring _cmd_stop's loop (TM-H3 finding)."""
     paths["pid"].write_text("12345")
     _stub_live_pid(monkeypatch, 12345)
-    sleep_counter = {"n": 0}
-
-    def stop_after_two_polls(_):
-        sleep_counter["n"] += 1
-        if sleep_counter["n"] >= 2:
-            paths["pid"].unlink()
+    paths["pid"].unlink()  # simulate the daemon already cleaning up
 
     with patch.object(cli.os, "kill") as mock_kill, patch.object(
-        cli.time, "sleep", side_effect=stop_after_two_polls
+        cli.time, "sleep"
     ):
         assert cli._cmd_stop() == 0
     mock_kill.assert_called_once_with(12345, signal.SIGTERM)
@@ -196,7 +202,7 @@ def test_cmd_status_treats_dead_pid_as_stale(paths, capsys):
 def test_cmd_status_returns_1_when_daemon_does_not_respond(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
     _stub_live_pid(monkeypatch, 12345)
-    with patch.object(cli.asyncio, "run", return_value=None):
+    with patch.object(cli.asyncio, "run", side_effect=fake_async_run(None)):
         assert cli._cmd_status() == 1
     assert "did not respond" in capsys.readouterr().err
 
@@ -206,7 +212,7 @@ def test_cmd_status_surfaces_errno_when_socket_unreachable(paths, capsys, monkey
     _stub_live_pid(monkeypatch, 12345)
     import errno
     err = ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
-    with patch.object(cli.asyncio, "run", return_value=err):
+    with patch.object(cli.asyncio, "run", side_effect=fake_async_run(err)):
         assert cli._cmd_status() == 1
     msg = capsys.readouterr().err
     assert "socket unreachable" in msg
@@ -218,7 +224,7 @@ def test_cmd_status_handles_oserror_with_no_errno(paths, capsys, monkeypatch):
     paths["pid"].write_text("12345")
     _stub_live_pid(monkeypatch, 12345)
     err = OSError("strange error")  # no errno
-    with patch.object(cli.asyncio, "run", return_value=err):
+    with patch.object(cli.asyncio, "run", side_effect=fake_async_run(err)):
         assert cli._cmd_status() == 1
     assert "unknown errno" in capsys.readouterr().err
 
@@ -233,7 +239,7 @@ def test_cmd_status_prints_state_and_log_tail(paths, capsys, monkeypatch):
         gateway_state="ready",
         clients=["confer/main", "myapp/main#a3f1"],
     )
-    with patch.object(cli.asyncio, "run", return_value=result):
+    with patch.object(cli.asyncio, "run", side_effect=fake_async_run(result)):
         assert cli._cmd_status() == 0
     out = capsys.readouterr().out
     assert "PID: 12345" in out
@@ -253,7 +259,7 @@ def test_cmd_status_omits_log_section_when_log_file_missing(paths, capsys, monke
         gateway_state="ready",
         clients=[],
     )
-    with patch.object(cli.asyncio, "run", return_value=result):
+    with patch.object(cli.asyncio, "run", side_effect=fake_async_run(result)):
         assert cli._cmd_status() == 0
     out = capsys.readouterr().out
     assert "Recent log tail" not in out
