@@ -86,6 +86,41 @@ def test_auto_label_uses_detached_when_git_output_is_short(monkeypatch, tmp_path
         assert auto_label() == "tiny/detached"
 
 
+def test_spawn_daemon_logs_resolved_binary_path(tmp_path, monkeypatch, caplog):
+    """The PATH-resolved confer-daemon path should be logged so a PATH-
+    shadow attack is visible in retrospect via the log."""
+    import logging
+    log_path = tmp_path / "daemon.log"
+    monkeypatch.setattr(client_mod, "log_file", lambda: log_path)
+    monkeypatch.setattr(client_mod.shutil, "which", lambda _: "/usr/local/bin/confer-daemon")
+
+    with caplog.at_level(logging.INFO, logger="confer.client"), patch.object(
+        client_mod.subprocess, "Popen"
+    ):
+        client_mod._spawn_daemon()
+
+    assert any(
+        "PATH-resolved to: /usr/local/bin/confer-daemon" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_spawn_daemon_logs_when_binary_not_on_path(tmp_path, monkeypatch, caplog):
+    import logging
+    log_path = tmp_path / "daemon.log"
+    monkeypatch.setattr(client_mod, "log_file", lambda: log_path)
+    monkeypatch.setattr(client_mod.shutil, "which", lambda _: None)
+
+    with caplog.at_level(logging.INFO, logger="confer.client"), patch.object(
+        client_mod.subprocess, "Popen"
+    ):
+        client_mod._spawn_daemon()
+
+    assert any(
+        "not found on PATH" in record.getMessage() for record in caplog.records
+    )
+
+
 def test_spawn_daemon_closes_log_fh_in_parent(tmp_path, monkeypatch):
     """The parent process should not retain an open file handle on the
     daemon log after spawn — leaks across many spawns."""

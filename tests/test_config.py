@@ -42,6 +42,55 @@ def test_load_raises_clear_error_on_missing_required_key(tmp_path):
         Settings.load(cfg)
 
 
+def test_loose_perms_emits_warning(tmp_path, caplog):
+    import logging
+    import os
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')
+    os.chmod(cfg, 0o644)  # group/other readable
+    with caplog.at_level(logging.WARNING, logger="confer.config"):
+        Settings.load(cfg)
+    assert any(
+        "loose permissions" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_perms_check_swallows_stat_failures(tmp_path, caplog, monkeypatch):
+    """If stat() can't read the file (permission, symlink loop, etc.), the
+    perms check must silently skip — it's best-effort, not a gate."""
+    import logging
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')
+
+    def raise_oserror(self):
+        raise OSError("stat blocked")
+
+    monkeypatch.setattr("pathlib.Path.stat", raise_oserror)
+
+    with caplog.at_level(logging.WARNING, logger="confer.config"):
+        # Should not raise
+        Settings.load(cfg)
+    assert not any(
+        "loose permissions" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_tight_perms_do_not_emit_warning(tmp_path, caplog):
+    import logging
+    import os
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')
+    os.chmod(cfg, 0o600)
+    with caplog.at_level(logging.WARNING, logger="confer.config"):
+        Settings.load(cfg)
+    assert not any(
+        "loose permissions" in record.getMessage() for record in caplog.records
+    )
+
+
 def test_settings_is_frozen(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')

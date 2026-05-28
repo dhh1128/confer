@@ -1,10 +1,32 @@
+import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 
 def default_config_path() -> Path:
     return Path.home() / ".config" / "confer" / "config.toml"
+
+
+def _warn_if_loose_perms(path: Path) -> None:
+    """Best-effort warning if config.toml has group/other bits set; doesn't
+    refuse to load because that would create a hostile failure mode where
+    a typo locks the user out."""
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        return
+    if mode & 0o077:
+        log.warning(
+            "Config file %s has loose permissions (mode 0o%o); the Discord "
+            "bot token may be readable by other users on this machine. "
+            "Run: chmod 600 %s",
+            path,
+            mode,
+            path,
+        )
 
 
 @dataclass(frozen=True)
@@ -24,6 +46,7 @@ class Settings:
                 f"Copy config.toml.example from the confer repo to {path}, "
                 f"chmod 600 it, and fill in your bot token and Discord user ID."
             ) from e
+        _warn_if_loose_perms(path)
         try:
             return cls(
                 discord_bot_token=data["discord_bot_token"],

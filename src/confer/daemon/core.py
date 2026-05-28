@@ -70,23 +70,34 @@ class Daemon:
         with suppress(FileNotFoundError):
             socket_path.unlink()
 
-        socket_path.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        for parent in {socket_path.parent, pid_file.parent}:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # mkdir(mode=...) only applies to *newly created* dirs; chmod a
+            # pre-existing parent so the fallback path is 0700 regardless.
+            with suppress(OSError):
+                parent.chmod(0o700)
 
         await self._transport.connect()
         await self._transport.wait_for_ready()
 
         self._start_time = time.time()
+        # Apply a restrictive umask around the bind so the socket file is
+        # created with 0600 directly, closing the TOCTOU window between
+        # bind and the subsequent chmod.
+        old_umask = os.umask(0o077)
         try:
-            self._server = await asyncio.start_unix_server(
-                self._handle_client, path=str(socket_path)
-            )
-        except OSError as e:
-            if e.errno == errno.EADDRINUSE:
-                log.info("lost a race to bind %s; exiting", socket_path)
-                await self._transport.close()
-                return
-            raise
+            try:
+                self._server = await asyncio.start_unix_server(
+                    self._handle_client, path=str(socket_path)
+                )
+            except OSError as e:
+                if e.errno == errno.EADDRINUSE:
+                    log.info("lost a race to bind %s; exiting", socket_path)
+                    await self._transport.close()
+                    return
+                raise
+        finally:
+            os.umask(old_umask)
         socket_path.chmod(0o600)
         _atomic_write_pid_file(pid_file, os.getpid())
         log.info("daemon listening on %s (pid %s)", socket_path, os.getpid())

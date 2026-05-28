@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -173,6 +174,11 @@ def _detect_repo_and_branch() -> tuple[str, str]:
 def _spawn_daemon() -> None:
     log_path = log_file()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = shutil.which("confer-daemon")
+    log.info(
+        "auto-spawning confer-daemon (PATH-resolved to: %s)",
+        resolved if resolved is not None else "<not found on PATH>",
+    )
     log_fh = open(log_path, "a")
     try:
         subprocess.Popen(

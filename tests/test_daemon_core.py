@@ -295,6 +295,54 @@ def test_assign_label_raises_when_all_disambiguators_collide(monkeypatch):
         daemon._assign_label("x", 42)
 
 
+async def test_serve_creates_parent_dirs_with_0700_perms(tmp_path):
+    """The fallback XDG_RUNTIME_DIR is a subdirectory we create ourselves;
+    it must be 0700 since the socket-perm protection relies on the parent
+    being inaccessible too."""
+    parent = tmp_path / "runtime"
+    sock = parent / "confer.sock"
+    pid = parent / "confer.pid"
+    transport = MagicMock()
+    transport.connect = AsyncMock()
+    transport.wait_for_ready = AsyncMock()
+    transport.close = AsyncMock()
+    daemon = Daemon(transport=transport)
+
+    task = asyncio.create_task(daemon.serve(sock, pid))
+    for _ in range(200):
+        if sock.exists():
+            break
+        await asyncio.sleep(0.01)
+
+    assert parent.stat().st_mode & 0o777 == 0o700
+
+    daemon.stop()
+    await task
+
+
+async def test_serve_chmods_existing_parent_dir_to_0700(tmp_path):
+    parent = tmp_path / "runtime"
+    parent.mkdir(mode=0o755)  # pre-existing with loose perms
+    sock = parent / "confer.sock"
+    pid = parent / "confer.pid"
+    transport = MagicMock()
+    transport.connect = AsyncMock()
+    transport.wait_for_ready = AsyncMock()
+    transport.close = AsyncMock()
+    daemon = Daemon(transport=transport)
+
+    task = asyncio.create_task(daemon.serve(sock, pid))
+    for _ in range(200):
+        if sock.exists():
+            break
+        await asyncio.sleep(0.01)
+
+    assert parent.stat().st_mode & 0o777 == 0o700
+
+    daemon.stop()
+    await task
+
+
 async def test_serve_binds_socket_with_0600_perms_and_writes_pid(tmp_path):
     sock = tmp_path / "confer.sock"
     pid = tmp_path / "confer.pid"
