@@ -445,6 +445,223 @@ def test_atomic_write_pid_file_replaces_existing(tmp_path):
     assert not pf.with_suffix(pf.suffix + ".tmp").exists()
 
 
+# ───── Multi-client / concurrency (C4 thorough coverage) ───────────────────
+
+
+async def test_two_concurrent_clients_with_distinct_labels_both_registered():
+    daemon = _make_daemon()
+
+    r1, w1 = asyncio.StreamReader(), _writer_mock()
+    r2, w2 = asyncio.StreamReader(), _writer_mock()
+
+    r1.feed_data(encode(Hello(request_id="h1", label_preferred="agent-a", pid=1)))
+    r2.feed_data(encode(Hello(request_id="h2", label_preferred="agent-b", pid=2)))
+
+    t1 = asyncio.create_task(daemon._handle_client(r1, w1))
+    t2 = asyncio.create_task(daemon._handle_client(r2, w2))
+
+    # Poll until both HELLO_OK have been written
+    for _ in range(200):
+        if w1.write.call_count and w2.write.call_count:
+            break
+        await asyncio.sleep(0.005)
+
+    assert "agent-a" in daemon._clients
+    assert "agent-b" in daemon._clients
+    assert len(daemon._clients) == 2
+
+    r1.feed_eof()
+    r2.feed_eof()
+    await asyncio.gather(t1, t2)
+
+    assert daemon._clients == {}
+
+
+async def test_label_collision_under_contention_disambiguates_later_arrival():
+    daemon = _make_daemon()
+
+    r1, w1 = asyncio.StreamReader(), _writer_mock()
+    r1.feed_data(encode(Hello(request_id="h1", label_preferred="confer/main", pid=1)))
+    t1 = asyncio.create_task(daemon._handle_client(r1, w1))
+
+    for _ in range(200):
+        if w1.write.call_count:
+            break
+        await asyncio.sleep(0.005)
+    assert "confer/main" in daemon._clients
+
+    r2, w2 = asyncio.StreamReader(), _writer_mock()
+    r2.feed_data(encode(Hello(request_id="h2", label_preferred="confer/main", pid=2)))
+    t2 = asyncio.create_task(daemon._handle_client(r2, w2))
+
+    for _ in range(200):
+        if w2.write.call_count:
+            break
+        await asyncio.sleep(0.005)
+
+    response2 = _written_messages(w2)[0]
+    assert isinstance(response2, HelloOk)
+    assert response2.label_assigned.startswith("confer/main#")
+    assert response2.label_assigned in daemon._clients
+    assert len(daemon._clients) == 2
+
+    r1.feed_eof()
+    r2.feed_eof()
+    await asyncio.gather(t1, t2)
+
+
+async def test_concurrent_notify_from_two_clients_each_gets_correct_result():
+    daemon = _make_daemon()
+
+    async def slow_notify(msg):
+        await asyncio.sleep(0.01)
+        return f"sent at {msg}"
+
+    daemon._transport.notify = AsyncMock(side_effect=slow_notify)
+
+    r1, w1 = asyncio.StreamReader(), _writer_mock()
+    r2, w2 = asyncio.StreamReader(), _writer_mock()
+
+    r1.feed_data(encode(Hello(request_id="h1", label_preferred="a", pid=1)))
+    r1.feed_data(encode(Notify(request_id="n1", message="msg-a")))
+    r1.feed_eof()
+
+    r2.feed_data(encode(Hello(request_id="h2", label_preferred="b", pid=2)))
+    r2.feed_data(encode(Notify(request_id="n2", message="msg-b")))
+    r2.feed_eof()
+
+    await asyncio.gather(
+        daemon._handle_client(r1, w1),
+        daemon._handle_client(r2, w2),
+    )
+
+    r1_messages = _written_messages(w1)
+    r2_messages = _written_messages(w2)
+    assert len(r1_messages) == 2 and len(r2_messages) == 2
+    nr1 = r1_messages[1]
+    nr2 = r2_messages[1]
+    assert isinstance(nr1, NotifyResult) and isinstance(nr2, NotifyResult)
+    assert nr1.request_id == "n1" and nr1.info == "sent at msg-a"
+    assert nr2.request_id == "n2" and nr2.info == "sent at msg-b"
+
+
+async def test_status_reflects_concurrent_connected_clients(monkeypatch):
+    daemon = _make_daemon()
+    daemon._transport.is_ready = MagicMock(return_value=True)
+    daemon._start_time = 0.0
+    monkeypatch.setattr("confer.daemon.core.time.time", lambda: 5.0)
+
+    r1, w1 = asyncio.StreamReader(), _writer_mock()
+    r2, w2 = asyncio.StreamReader(), _writer_mock()
+    r1.feed_data(encode(Hello(request_id="h1", label_preferred="alpha", pid=1)))
+    r2.feed_data(encode(Hello(request_id="h2", label_preferred="beta", pid=2)))
+
+    t1 = asyncio.create_task(daemon._handle_client(r1, w1))
+    t2 = asyncio.create_task(daemon._handle_client(r2, w2))
+
+    for _ in range(200):
+        if len(daemon._clients) == 2:
+            break
+        await asyncio.sleep(0.005)
+
+    # Now a CLI sends Status while both are connected
+    rs, ws = _reader_with([Status(request_id="s1")]), _writer_mock()
+    await daemon._handle_client(rs, ws)
+
+    response = _written_messages(ws)[0]
+    assert isinstance(response, StatusResult)
+    assert sorted(response.clients) == ["alpha", "beta"]
+
+    r1.feed_eof()
+    r2.feed_eof()
+    await asyncio.gather(t1, t2)
+
+
+# ───── TM-CV2: disconnect cleanup observable via Status ────────────────────
+
+
+async def test_status_does_not_include_disconnected_clients():
+    daemon = _make_daemon()
+    daemon._transport.is_ready = MagicMock(return_value=True)
+    daemon._start_time = 0.0
+
+    # Client connects, registers, then immediately disconnects (EOF).
+    r = _reader_with([Hello(request_id="h1", label_preferred="ephemeral", pid=1)])
+    w = _writer_mock()
+    await daemon._handle_client(r, w)
+
+    assert "ephemeral" not in daemon._clients
+
+    # CLI Status query after disconnect: 'ephemeral' should NOT be listed.
+    rs = _reader_with([Status(request_id="s1")])
+    ws = _writer_mock()
+    await daemon._handle_client(rs, ws)
+
+    response = _written_messages(ws)[0]
+    assert isinstance(response, StatusResult)
+    assert "ephemeral" not in response.clients
+
+
+# ───── TM-CV3: _another_instance_running on PermissionError ────────────────
+
+
+async def test_another_instance_running_returns_false_on_permission_error(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    sock.write_text("stale")
+
+    async def raise_permission(_):
+        raise PermissionError("EACCES")
+
+    monkeypatch.setattr(asyncio, "open_unix_connection", raise_permission)
+
+    transport = MagicMock()
+    daemon = Daemon(transport=transport)
+    result = await daemon._another_instance_running(sock)
+    # Documented broad-OSError catch: any failure to connect is treated as
+    # "nobody there" so the daemon proceeds to unlink and bind. EACCES is
+    # in scope.
+    assert result is False
+
+
+# ───── TM2: _make_disambiguator collision space ────────────────────────────
+
+
+def test_make_disambiguator_produces_distinct_values_for_repeated_calls():
+    """Two calls with the same pid produce different hashes because the
+    time_ns input differs. Not strictly guaranteed but vanishingly unlikely
+    to fail at 100 iterations."""
+    seen = set()
+    for _ in range(100):
+        seen.add(_make_disambiguator(42))
+    # Expect very high distinctness (in practice all 100 should differ).
+    assert len(seen) > 50
+
+
+# ───── TM4: connection reset / broken pipe in reader ────────────────────────
+
+
+async def test_handle_client_swallows_connection_reset_in_reader():
+    daemon = _make_daemon()
+    reader = asyncio.StreamReader()
+    reader.set_exception(ConnectionResetError("connection reset"))
+    writer = _writer_mock()
+
+    # Should not propagate the ConnectionResetError; finally runs cleanly.
+    await daemon._handle_client(reader, writer)
+
+
+async def test_handle_client_swallows_broken_pipe_in_reader():
+    daemon = _make_daemon()
+    reader = asyncio.StreamReader()
+    reader.set_exception(BrokenPipeError("pipe closed"))
+    writer = _writer_mock()
+
+    await daemon._handle_client(reader, writer)
+
+
+# ───── (back to lifecycle / stop tests) ────────────────────────────────────
+
+
 def test_stop_is_noop_when_no_serve_running(tmp_path):
     transport = MagicMock()
     daemon = Daemon(transport=transport)

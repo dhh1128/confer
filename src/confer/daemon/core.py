@@ -158,6 +158,9 @@ class Daemon:
                     client_label = done
                 if isinstance(msg, Bye):
                     break
+        except (ConnectionResetError, BrokenPipeError):
+            # Client dropped abruptly. Clean up normally; nothing else to do.
+            pass
         finally:
             if client_label is not None:
                 self._clients.pop(client_label, None)
