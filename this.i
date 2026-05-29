@@ -46,6 +46,123 @@ Confer = goal:
         from §8 is dropped (project does not use Jira).
       approved-by: daniel, 2026-05-27
 
+    # ─── DESIGN STANCE ───────────────────────────────────────────────────────
+
+    Productivity While Away = goal:
+      id: pn4xvk2m
+      why: >
+        Confer's primary value is keeping AI coding agents productive while
+        daniel is away from his workstation. The user→agent direction (notify,
+        ask blocking on user input) is the load-bearing path. Daniel is
+        responsive on phone via Discord when away, and at the laptop locally
+        (outside confer's reach) when present. This goal narrows the design
+        space: scenarios that fall outside it — preserving agent-conversation
+        state across agent failure, real-time co-presence at the laptop,
+        multi-user collaboration — are explicitly not in scope, and decisions
+        should not pay complexity costs to support them. Recorded at the start
+        of phase 2C as the parent intention from which several specific
+        decisions derive (Asymmetric Robustness, Spokesperson Abstraction
+        Principle, Minimal Agent Surface Operator Config, Natural Language
+        Outcomes, Acknowledge Actionable State Changes).
+      approved-by: daniel, 2026-05-28
+
+    Asymmetric Robustness = decision:
+      id: wq7knm3p
+      why: >
+        Stance derivative of Productivity While Away (pn4xvk2m). The daemon
+        survives agent churn — dozens of MCP servers per day, started and
+        killed without warning — while keeping the Discord side sane. The
+        reverse direction is deliberately not symmetrical: the daemon does not
+        preserve agent-conversation state across agent failure. If an agent
+        dies with an outstanding ask, the user is told once and the question
+        is dropped; daniel restarts the agent locally and either re-asks or
+        proceeds without the missing answer. Considered preserving in-flight
+        asks across MCP-server restarts (carry the question over to the next
+        same-label agent via check_messages): rejected because the new agent
+        process didn't ask the question and has no awaiter to resume, the
+        preservation contradicts Productivity While Away (daniel is the
+        fallback, not the daemon), and the complexity is real while the value
+        is hypothetical. Operationalized in Orphan Ask Drop Policy (v4kn7mpq),
+        ASK_CANCEL Protocol (3mq7pvxn), and Check Messages Queue Scaffolding
+        (7nvpkqm3).
+      approved-by: daniel, 2026-05-28
+
+    Spokesperson Abstraction Principle = decision:
+      id: vj4xqn7p
+      why: >
+        Stance derivative of Productivity While Away (pn4xvk2m). The
+        MCP-facing surface treats confer as an opaque spokesperson that
+        returns answers on the user's behalf. The MCP server makes no
+        assumption about how the answer is produced — Discord today, a future
+        policy engine, a secondary user-owned agent, a local CLI injection,
+        or any other channel the daemon comes to support. Operationalized in
+        (a) tool docstring framing (the agent is told it is asking confer,
+        not "DMing the user"), (b) directive text on timeout (neutral "no
+        answer was received within the requested window"), (c) daemon
+        dispatcher input shape (replies arrive as (label, content) with no
+        source-channel branding). Considered baking Discord-as-channel into
+        the MCP layer for simplicity: rejected because any later channel
+        would require revisiting every user-facing string and the protocol's
+        mental model. The encapsulation cost is small now; unwinding the
+        assumption later would be substantial.
+      approved-by: daniel, 2026-05-28
+
+    Minimal Agent Surface Operator Config = decision:
+      id: mk7npq4x
+      why: >
+        Stance derivative of Productivity While Away (pn4xvk2m). The MCP tool
+        surface exposes only the levers that meaningfully affect an agent's
+        specific call — the question text, how long to wait, what fallback to
+        apply on timeout. Cadence of re-pings, hard caps on wait duration,
+        queue size bounds, retention windows, and similar concerns are
+        operator-side and live in ~/.config/confer/config.toml. Considered
+        exposing re-ping interval, wait cap, and queue behavior as MCP
+        parameters: rejected because the agent does not have meaningful
+        context to set these per call, every additional knob is one more
+        thing the tool description has to teach, and operator-level tunables
+        can be adjusted without redeploying agents. Bounds (e.g.,
+        give_up_after_seconds ≤ 86400) are enforced at the API surface via
+        Pydantic so the agent receives a clear schema error rather than a
+        runtime sentinel.
+      approved-by: daniel, 2026-05-28
+
+    Natural Language Outcomes = decision:
+      id: xj4nqv7m
+      why: >
+        Stance derivative of Productivity While Away (pn4xvk2m). Every string
+        the agent receives from an ask or notify call reads as English the
+        agent's reasoning naturally handles. No opaque sentinel tokens whose
+        meaning the system prompt has to teach. Timeout outcomes, cancellation
+        outcomes, and daemon-disconnection outcomes are natural-language
+        directives in spokesperson voice ("No answer was received within the
+        requested window. Follow your existing instructions or your best
+        judgment about how to proceed."). Originally drafted as opaque
+        sentinels (<NO_RESPONSE_USE_BEST_JUDGMENT>); revised because sentinels
+        require special vocabulary the agent has to learn before the call can
+        produce meaningful behavior, while directives are self-explanatory
+        and cross the boundary as ordinary prose. Operationalizes Sentinel
+        Returns Not Exceptions (nx2pj4wq).
+      approved-by: daniel, 2026-05-28
+
+    Acknowledge Actionable State Changes = decision:
+      id: qn7pkm4v
+      why: >
+        Stance derivative of Productivity While Away (pn4xvk2m). Every
+        transition that changes whether a question is answerable produces a
+        brief Discord DM to the user: timeout (with disposition), cancellation
+        (question withdrawn), agent disconnect (lost contact). Beyond these
+        moments, Discord-side noise is minimized: re-pings are short, no
+        unsolicited status updates, no decorative footers when only one ask
+        is pending. Considered silent transitions (the user discovers state
+        only on the next interaction): rejected because Productivity While
+        Away makes the asynchronous Discord channel the user's only window
+        into agent state — silent transitions strand the user mid-dictation.
+        Considered chattier updates (periodic status DMs): rejected as noise
+        without action-relevance. Operationalized in Ask Closing Notifications
+        (pkn7mvq4), the re-ping behavior in Wait Behavior Re-Pings
+        (hj7m4qbx), and the Reply Routing Footer (xqp4nv7m).
+      approved-by: daniel, 2026-05-28
+
     # ─── STACK & STANDARDS ───────────────────────────────────────────────────
 
     Stack Selection = decision:
@@ -394,6 +511,95 @@ Confer = goal:
         explicit `confer-daemon stop` exists for clean termination when the
         user wants it (e.g., before upgrade or reboot).
 
+    Orphan Ask Drop Policy = decision:
+      id: v4kn7mpq
+      why: >
+        Derivative of Asymmetric Robustness (wq7knm3p). When an MCP server's
+        socket closes with asks pending (and the close was NOT a graceful
+        shutdown that already sent ASK_CANCEL — see 3mq7pvxn), the daemon
+        drops each pending ask immediately. No retention window, no re-routing
+        to the next same-label MCP server, no participation in routing for
+        late replies. For each dropped ask, the daemon sends a one-time
+        "Lost contact with the agent that asked: *{question}*" DM (see Ask
+        Closing Notifications, pkn7mvq4). If the user replies after the drop,
+        the reply falls to the no-pending-asks bounce path described in
+        Check Messages Queue Scaffolding (7nvpkqm3). Considered the 1h
+        retention window originally drafted in 3nx7pq4m's resolution:
+        rejected per Productivity While Away (pn4xvk2m) — the daemon does
+        not preserve agent state across agent failure; daniel restarts the
+        agent locally and either re-asks or proceeds. Considered routing
+        orphan replies into the check_messages queue for the next same-label
+        agent: rejected as the same anti-goal. The "smart bounce" affordance
+        (a bounce DM that names the dead question) is also dropped — its
+        marginal user value does not justify retaining orphan dispatch-table
+        entries.
+
+    Check Messages Queue Scaffolding = decision:
+      id: 7nvpkqm3
+      why: >
+        Derivative of Asymmetric Robustness (wq7knm3p) and Minimal Agent
+        Surface Operator Config (mk7npq4x). Phase 2C builds the minimal
+        daemon-side queue infrastructure that phase 2D's check_messages tool
+        will read from, but does not expose any MCP tool surface in 2C and
+        does not implement 7kxpvnqj rule (4) broadcast. Concrete scope:
+          - dict[agent_label, collections.deque[QueuedMessage]] on the
+            Daemon instance.
+          - bounded at 100 entries per label, FIFO eviction on overflow with
+            a single-line log warning.
+          - QueuedMessage carries (timestamp, content, source,
+            original_question). The source enum currently includes only
+            "late_reply" (user replies to a closed ask within reply
+            attribution rules). "orphan_reply" is reserved but not produced
+            in 2C — per Orphan Ask Drop Policy (v4kn7mpq), orphan replies
+            fall to bounce, not enqueue.
+          - No retrieval API in 2C. Phase 2D will add check_messages on top.
+          - Lost on daemon death (covered by tension nq7pxw4m).
+        During 2C, an unrouted DM (no asks pending) triggers a daemon DM
+        bounce: "No agent is asking you anything right now — your message
+        wasn't delivered. (Check-in tool coming in a later phase.)"
+        Considered full broadcast (7kxpvnqj rule 4) in 2C: rejected because
+        broadcast and check_messages consumer semantics are conjoined and
+        want to be settled together in 2D. Considered dropping the queue
+        entirely until 2D: rejected because late_reply is a real edge case
+        whose graceful handling is worth the small code footprint now.
+
+    On Message Handler Wiring = decision:
+      id: m4kpvn7q
+      why: >
+        DiscordTransport receives an on_user_message callback at
+        construction: DiscordTransport(on_user_message=daemon
+        ._dispatch_user_message). The callback is invoked from the
+        transport's @client.event handler when a DM arrives from the
+        configured confer_user_id. No module-level registry, no late binding
+        via setter, no inheritance. Considered setter-based wiring
+        (DiscordTransport().set_on_user_message(...)): rejected because the
+        callback is constitutive of the transport's behavior, not a
+        configurable add-on — constructing a transport without it would
+        produce a half-built object. Considered subclassing discord.py's
+        Client: rejected per DiscordTransport Class (b6npq7wm), which
+        already mandates composition over inheritance for the same family
+        of reasons. Derivative of Asymmetric Robustness (wq7knm3p) — the
+        dependency-injection shape supports the daemon as the routing
+        authority while keeping the transport testable in isolation.
+
+    Reply Routing Parser = decision:
+      id: nqx7pmv4
+      why: >
+        The reply-routing rules from Reply Routing Rules (7kxpvnqj) are
+        implemented as a pure function route_user_message(content: str,
+        pending_asks: Sequence[PendingAsk]) -> RouteDecision living in
+        src/confer/daemon/routing.py. RouteDecision is a small discriminated
+        union: Deliver(label, content) | Bounce(reason) | Ambiguous
+        (numbered_list). The daemon's _dispatch_user_message calls the
+        function then acts on the result. Considered a method on the Daemon
+        class: rejected because the routing logic is the most testable part
+        of the dispatch path and benefits from being callable in isolation,
+        without daemon scaffolding (sockets, asyncio tasks, transport
+        mocks). Considered embedding the routing logic inline in
+        _dispatch_user_message: rejected for the same testability reason.
+        Tests exercise route_user_message directly with synthetic
+        pending_asks lists.
+
     # ─── TOOL SURFACE ────────────────────────────────────────────────────────
 
     Three Tools = decision:
@@ -411,18 +617,30 @@ Confer = goal:
     ask Signature With on_timeout = decision:
       id: 4mhp7jqx
       why: >
-        Signature: ask(question: str, timeout_seconds: int = 1800,
-        on_timeout: Literal["use_best_judgment", "wait_forever", "abort"]
-        = "use_best_judgment") -> str. Considered a single timeout-or-not
-        flag: daniel was explicit that the timeout must not be a hard cap on
-        human response time — different questions need different fallback
-        behaviors. on_timeout is therefore a per-call policy: "what's the
-        best refactor approach" tolerates use_best_judgment fallback; "should
-        I drop this database table" must wait_forever. Three modes are the
-        minimum that covers user-best-judgment, must-have-human-answer, and
-        stop-and-surface-elsewhere. Default 30 min (1800s) was picked as a
-        round number between "agent attention span" (~10 min) and "user
-        away-from-desk" (~1 hour); revisable from experience.
+        Signature: ask(question: str, give_up_after_seconds: int = 1800,
+        on_timeout: Literal["use_best_judgment", "abort"]
+        = "use_best_judgment") -> str. The give_up_after_seconds bound is
+        enforced by Pydantic at the schema surface (1 ≤ x ≤ 86400, where
+        86400 is the daemon's 24h operator-set ceiling per Minimal Agent
+        Surface Operator Config, mk7npq4x). Two on_timeout modes; the third
+        originally drafted (wait_forever / wait_max) was removed in 2C
+        because its semantics ("re-ping until answered, capped somewhere")
+        collapse cleanly to "set give_up_after_seconds = 86400 and let the
+        universal re-ping cadence run" — no separate mode needed. The
+        parameter was originally named timeout_seconds; renamed in 2C after
+        recognizing the original name conflated two concepts (when the wait
+        ends vs. how often to re-ping). The Fowler renaming discipline (§4
+        of docs/methodology.md) demanded the rename. Considered a single
+        timeout-or-not flag with no policy field: rejected because different
+        questions need different fallback behaviors — "what's the best
+        refactor approach" tolerates use_best_judgment, "should I drop this
+        database table" must abort and surface state. Default 30 min (1800s)
+        is a round number between agent attention span (~10 min) and user
+        away-from-desk (~1 hour); revisable from experience. The directive
+        strings returned on timeout are operationalized by Natural Language
+        Outcomes (xj4nqv7m) and Sentinel Returns Not Exceptions (nx2pj4wq);
+        the universal re-ping behavior is operationalized by Wait Behavior
+        Re-Pings (hj7m4qbx).
 
     Next Message Wins For Reply = decision:
       id: vk3qn7fp
@@ -441,28 +659,59 @@ Confer = goal:
     Sentinel Returns Not Exceptions = decision:
       id: nx2pj4wq
       why: >
-        Timeout outcomes return sentinel strings ("<NO_RESPONSE_USE_BEST_JUDGMENT>"
-        or "<NO_RESPONSE_ABORT>") rather than raising Python exceptions.
-        Considered raising TimeoutError or a custom AskTimeoutError: forces
-        the calling agent into try/except framing that the MCP protocol passes
-        through as tool errors, which obscures the intentional "this is a
-        normal outcome with a fallback policy" nature of the result. Sentinels
-        keep the return type uniformly str and let the agent's natural-language
-        reasoning handle the timeout case.
+        Timeout, cancellation, and daemon-disconnect outcomes are returned as
+        natural-language directives in spokesperson voice (see Spokesperson
+        Abstraction Principle, vj4xqn7p), not as raised exceptions and not as
+        opaque sentinel tokens. The directive strings:
+          - on_timeout="use_best_judgment": "No answer was received within the
+            requested window. Follow your existing instructions or your best
+            judgment about how to proceed."
+          - on_timeout="abort": "No answer was received within the requested
+            window. Stop work on this task and leave its state somewhere the
+            user can pick up later (e.g., a WIP commit, a status file)."
+          - daemon disconnect mid-ask: "Lost connection to confer; question
+            not answered. Retry or proceed without the user's input."
+          - ASK_CANCEL: no string returns — the agent's tool call is cancelled
+            at the MCP layer and the agent isn't there to read it.
+        Considered raising TimeoutError or a custom AskTimeoutError across the
+        MCP boundary: rejected because exceptions surface as tool errors that
+        obscure the "normal outcome with a fallback policy" nature of the
+        result. Originally drafted as opaque sentinel tokens
+        (<NO_RESPONSE_USE_BEST_JUDGMENT>, <NO_RESPONSE_ABORT>); revised in 2C
+        per Natural Language Outcomes (xj4nqv7m) — sentinels require the
+        agent's system prompt to teach the vocabulary, while directives are
+        self-explanatory and cross the boundary as ordinary prose. The node
+        name retains "Sentinel" as a legacy label; the values are now
+        directives.
 
-    Wait Forever Re-Pings = decision:
+    Wait Behavior Re-Pings = decision:
       id: hj7m4qbx
       why: >
-        When on_timeout="wait_forever", the server treats timeout_seconds as
-        a re-ping interval: every timeout_seconds without a reply, the bot
-        sends a reminder DM ("still waiting on your input for: [question]").
-        Considered no re-ping (silently wait): the user would have no surfacing
-        on their phone after the initial notification, which defeats the
-        purpose. Considered a fixed re-ping interval (e.g., every 30 min
-        regardless): less ergonomic — the caller knows what cadence is
-        appropriate per question. Tradeoff: notification spam if the caller
-        sets timeout_seconds too low for a critical wait_forever question;
-        the caller is responsible for picking sensible values.
+        All in-flight asks send a reminder DM at the daemon-configured
+        re-ping cadence (default 900 seconds = 15 min, configurable via
+        ask.re_ping_every_seconds in ~/.config/confer/config.toml). Universal
+        across both on_timeout modes; not a per-mode behavior. Body text:
+        "Still waiting on your answer to: *{question}*" (italics on the
+        question). The footer composed by Reply Routing Footer (xqp4nv7m) is
+        recomputed and re-attached per send because numeric shortcuts reflect
+        the current pending-ask set. Skips any re-ping that would fire within
+        60 seconds of the give_up_after_seconds deadline (avoids "still
+        waiting" followed seconds later by "no answer received"). The
+        86400-second cap on give_up_after_seconds (enforced by Pydantic per
+        Minimal Agent Surface Operator Config, mk7npq4x) is the upper bound
+        on how many re-pings can fire for any single ask. Implementation
+        shape: per-ask asyncio.Task running an interval-sleep loop, stored
+        alongside the _PendingAsk record, cancelled in order (re-ping task
+        first, then dispatch-table entry removed, then client-facing Future
+        resolved) so a re-ping cannot race a resolved ask. Re-ping send
+        failures (DiscordException during transport.send) are non-fatal — the
+        task logs and continues; the ask itself still resolves on reply or
+        timeout per its own contract. Originally drafted as a per-mode
+        behavior tied to a wait_forever mode at the caller-chosen interval;
+        revised in 2C to a universal daemon-config concern per Minimal Agent
+        Surface Operator Config (mk7npq4x) and Acknowledge Actionable State
+        Changes (qn7pkm4v). Renamed from "Wait Forever Re-Pings" to reflect
+        that re-pings are now universal, not wait_forever-specific.
 
     check_messages In-Memory State = decision:
       id: 5pq7n3kw
@@ -612,6 +861,92 @@ Confer = goal:
         When Proactive Arrives Mid-Ask (rk2nq7pm) remains open in the
         multi-agent context.
 
+        Phase-2C staging notes: (a) Rule (4) broadcast is deferred to phase 2D
+        when the check_messages tool surface lands; during 2C, an unrouted DM
+        when no asks are pending falls to the bounce path described in Check
+        Messages Queue Scaffolding (7nvpkqm3). (b) The dispatch table consulted
+        for routing contains only LIVE asks; orphaned asks are dropped
+        immediately per Orphan Ask Drop Policy (v4kn7mpq) and do not
+        participate in attribution. (c) The footer mechanics described in this
+        rule are implemented per Reply Routing Footer (xqp4nv7m).
+
+    Ask Closing Notifications = decision:
+      id: pkn7mvq4
+      why: >
+        Derivative of Acknowledge Actionable State Changes (qn7pkm4v). Every
+        ask that resolves WITHOUT a user reply sends a brief Discord DM
+        informing the user what disposition was chosen:
+          - timeout (use_best_judgment): "**Time's up — agent will use its
+            best judgment on:** *{question}*"
+          - timeout (abort): "**Time's up — agent will stop and surface state
+            for:** *{question}*"
+          - cancellation (ASK_CANCEL): "**Question withdrawn:** *{question}*"
+          - agent disconnect (orphan): "**Lost contact with the agent that
+            asked:** *{question}*"
+        Reply-resolved asks are silent (the user just sent the reply; they
+        know). DMs are best-effort; send failures log but do not back-
+        propagate to the agent. The text is framed in spokesperson voice
+        (per Spokesperson Abstraction Principle, vj4xqn7p) — the daemon is
+        reporting what it did on the agent's behalf, not what the user failed
+        to do. Sequence inside the daemon when a timeout fires: (1) cancel
+        the per-ask re-ping task, (2) remove the dispatch entry, (3) send
+        ASK_TIMEOUT to the MCP server (agent unblocks first), (4) send the
+        closing DM (courtesy, best-effort). Considered silent resolution
+        (user discovers state only on the next interaction): rejected per
+        Productivity While Away (pn4xvk2m) — the asynchronous Discord
+        channel is the user's only window into agent state. Considered
+        including timestamps, attempt counters, or durations in the DM body:
+        rejected as noise.
+
+    ASK_CANCEL Protocol = decision:
+      id: 3mq7pvxn
+      why: >
+        Derivative of Acknowledge Actionable State Changes (qn7pkm4v) and
+        Asymmetric Robustness (wq7knm3p). The protocol carries an
+        ASK_CANCEL{request_id} message from MCP server to daemon. Daemon
+        receipt is idempotent: lookup of pending_asks by request_id; if
+        absent (already resolved by reply or timeout — race), no-op.
+        Otherwise: cancel the per-ask re-ping task, remove the dispatch
+        entry, send "Question withdrawn" closing DM (see Ask Closing
+        Notifications, pkn7mvq4). No ack message; fire-and-forget. The MCP
+        server emits ASK_CANCEL in two paths: (a) when its tool handler
+        receives asyncio.CancelledError (typically from the agent client
+        pressing ESC, propagated via the MCP cancellation notification), and
+        (b) during graceful MCP-server shutdown — the lifespan handler
+        enumerates pending asks and fires ASK_CANCEL for each before closing
+        the socket. Ungraceful crashes (SIGKILL, OOM) fall to socket-close
+        cleanup, which triggers Orphan Ask Drop Policy (v4kn7mpq) with "Lost
+        contact" DMs. The asymmetry between cancel-DM and lost-contact-DM is
+        informational: it tells the user whether the shutdown was
+        intentional. Considered a single message kind for both clean-cancel
+        and crash: rejected because the user-facing DM should differ.
+        Considered a reason field on ASK_CANCEL: rejected because the daemon
+        doesn't branch on it and the agent doesn't supply meaningful reasons
+        via MCP cancellation.
+
+    Reply Routing Footer = decision:
+      id: xqp4nv7m
+      why: >
+        Derivative of Acknowledge Actionable State Changes (qn7pkm4v) and
+        Minimal Agent Surface Operator Config (mk7npq4x). The footer the bot
+        appends to ask DMs (per Reply Routing Rules, 7kxpvnqj) is composed
+        daemon-side at send time, not transport-side, and is recomputed for
+        every send — including each re-ping per Wait Behavior Re-Pings
+        (hj7m4qbx) — because numeric shortcuts (per 7kxpvnqj rule 2) are
+        1-based newest-first over the current pending-ask set and the right
+        index drifts as asks come and go. Format when multiple asks are
+        pending: "(reply: <comma-separated unique shortest prefix per
+        label>, 1-N, or just answer if I'm the only one waiting)". When only
+        one ask is pending, the footer is omitted entirely — the DM body is
+        enough, and a footer that says "or just answer if I'm the only one
+        waiting" while the single-ask shortcut is already trivially
+        available is noise. Considered transport-side composition: rejected
+        because the transport doesn't know the full pending-ask set; pushing
+        the responsibility to the daemon avoids a callback the transport
+        would otherwise need. Considered a static footer computed once at
+        ask-time: rejected because re-ping context drifts as the pending
+        set evolves.
+
     # ─── NAMING ──────────────────────────────────────────────────────────────
 
     Naming = decision:
@@ -655,17 +990,19 @@ Confer = goal:
         footprint (user must keep a daemon running, likely under systemd
         --user or similar). For v1, accepted as a known gap.
       resolution: >
-        Resolved by Central Daemon Architecture (dq7n3xpk). The daemon now
-        outlives any individual MCP server; pending ask state is held in the
-        daemon. When the originating MCP server dies, the ask remains pending
-        in the daemon. If the user replies after the MCP server is gone, the
-        daemon either (a) delivers the reply via check_messages to the next
-        MCP server that connects with the same agent label, OR (b) drops the
-        reply if no such MCP server returns within a retention window
-        (default 1 hour, revisitable). The replacement failure mode — the
-        DAEMON dying — is the lesser one (one long-lived process to monitor
-        vs. dozens of ephemeral ones) and is captured separately as
-        Daemon Death Loses Pending State (nq7pxw4m).
+        Resolved by Orphan Ask Drop Policy (v4kn7mpq) under Asymmetric
+        Robustness (wq7knm3p). The daemon outlives any individual MCP server
+        but does not attempt to preserve in-flight ask state across agent
+        failure. On socket close, pending asks for the dead server are
+        dropped immediately and the user is notified once via "Lost contact
+        with the agent that asked: *{question}*." The original draft of this
+        resolution (1h retention + check_messages routing for orphan replies)
+        was reversed in 2C after the Productivity While Away framing
+        (pn4xvk2m) clarified that preservation across agent death is an
+        explicit anti-goal — daniel restarts the agent locally and either
+        re-asks or proceeds. The remaining failure surface — the DAEMON
+        dying — is captured separately as Daemon Death Loses Pending State
+        (nq7pxw4m).
       resolved-by: dh, 2026-05-28
 
     Proactive Messages Lost On Restart = tension:
@@ -836,6 +1173,41 @@ Confer = goal:
         ${XDG_STATE_HOME:-$HOME/.local/state}/confer/state.db that the
         daemon writes-through on every state change and reads on startup to
         recover.
+
+    CLI Answer Injection Pending = tension:
+      id: 7pvkn4qm
+      nature: >
+        daniel comes back to his laptop where an agent is blocked in an ask
+        waiting for a Discord reply he didn't see. He cannot answer locally
+        because Claude Code can't accept input on the agent's behalf while
+        inside the tool call. The only paths today are (a) reply via Discord,
+        or (b) Ctrl-C the agent (losing context, defeating Productivity While
+        Away). A future "confer answer <pending-id> '...'" CLI would route
+        through the daemon's existing (label, content) reply ingestion path
+        — explicitly designed to be channel-agnostic per Spokesperson
+        Abstraction Principle (vj4xqn7p) — and unblock the agent without
+        losing context. Phase 2C does not build this; the principle exists
+        only to keep the ingestion seam shaped to accept it later.
+      revisit-when: >
+        daniel encounters the laptop-blocked-on-Discord scenario in real use
+        at least twice, OR a second non-Discord input source (policy engine,
+        secondary agent) is added and motivates the same ingestion seam.
+
+    Policy-Backed Spokesperson Substitution Pending = tension:
+      id: vkqmn7p4
+      nature: >
+        Spokesperson Abstraction Principle (vj4xqn7p) keeps the protocol
+        open to a future in which some asks are answered by a policy engine
+        or a secondary agent without involving daniel at all (recurring
+        approvals, time-of-day rules, project-scoped defaults, sensible
+        no-ops for routine clarifications). Phase 2C does not build any of
+        this; the principle exists only to prevent the MCP layer from baking
+        in assumptions that would block such a future.
+      revisit-when: >
+        A concrete set of questions a policy could safely answer without
+        daniel's involvement emerges from real use (e.g., a recurring
+        approval pattern across many similar asks), OR a second user-side
+        responder (secondary agent, scripted handler) becomes desired.
 
     # ─── PROMPT AUDIT HISTORY ────────────────────────────────────────────────
 
