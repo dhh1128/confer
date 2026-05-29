@@ -212,3 +212,18 @@ async def test_server_instructions_document_terse_reply_vocabulary():
     assert "TERSE" in instructions
     assert '"stop"' in instructions
     assert '"bj"' in instructions or '"go"' in instructions
+
+
+async def test_notify_guidance_clarifies_one_way_vs_ask():
+    """G2 refinement: notify is one-way; a reply-needed blocker is an ask.
+    The stale 'blocker that needs the user's input' notify bullet is gone."""
+    instructions = server.mcp.instructions
+    assert "one-way" in instructions
+    assert "blocker that needs the user's input" not in instructions
+
+
+async def test_on_timeout_abort_covers_no_safe_default():
+    """G2 refinement: abort applies when there's no safe default, not only
+    for destructive/irreversible actions."""
+    instructions = server.mcp.instructions
+    assert "no safe default" in instructions

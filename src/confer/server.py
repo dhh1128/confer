@@ -16,8 +16,9 @@ how the user is actually responding.
 USE the `notify` tool when:
 - A long-running task you started has finished and the user is likely away
   (build, deploy, test suite, scheduled job).
-- You hit a blocker that needs the user's input AND the conversation has
-  been idle long enough that they may have context-switched.
+- Something important happened the user should know about that does NOT need
+  a reply. (notify is one-way — it returns only a send confirmation. If you
+  need an answer back, that's an `ask`, not a notify.)
 - The user explicitly asked to be told when something happens.
 
 USE the `ask` tool when:
@@ -27,8 +28,10 @@ USE the `ask` tool when:
 When using `ask`, choose on_timeout deliberately:
 - "use_best_judgment" for moderate-stakes questions where you can reasonably
   proceed if the user is unreachable.
-- "abort" for high-stakes questions (destructive operations, irreversible
-  choices). On timeout you'll be told to stop and surface state.
+- "abort" for high-stakes questions (destructive or irreversible actions),
+  OR when there is no safe default you could fall back on — i.e. you
+  genuinely cannot proceed without an answer. On timeout you'll be told to
+  stop and surface state.
 You will always receive a natural-language string answer; never a sentinel
 token or an exception. If the answer indicates no human response arrived,
 follow the directive in that string.
