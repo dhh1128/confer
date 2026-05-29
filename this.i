@@ -1246,6 +1246,43 @@ Confer = goal:
         shorthand gets the terseness without machinery, and daniel is never
         locked to the vocabulary — he can always dictate something longer.
 
+    Pending-Message Piggyback Hint = decision:
+      id: pb7nqm4x
+      why: >
+        Partial mitigation of Unsolicited Input Is Pull-Only (pl7nqx4v).
+        confer cannot push into a running agent (MCP is client-pull), so
+        unsolicited input (broadcast / notify_reply / late_reply) waits in the
+        agent's check_messages queue until the agent checks. Two cheap,
+        mechanical mitigations raise responsiveness without changing the pull
+        model:
+
+        (1) Piggyback hint. Every confer-authored response string the agent
+            already receives carries a "(N message(s) waiting — call
+            check_messages)" suffix when the agent's queue is non-empty. The
+            count rides the wire as a pending_count field on AskReply and
+            AskTimeout; for notify it is folded into the existing free-form
+            NotifyResult.info string. The hint rides only on confer-authored
+            strings, never polluting the user's verbatim ask reply: on a real
+            reply the count is appended as a clearly bracketed "[confer: N
+            ...]" meta-note, visually distinct from the user's words. Every
+            notify/ask the agent already makes thus becomes a checkpoint with
+            zero dependence on the agent remembering to poll.
+
+        (2) Event-anchored check nudge. The server instructions recommend
+            calling check_messages at points the agent can actually detect —
+            after any long operation, at the top of each work iteration,
+            before any irreversible action — NOT on a wall-clock cadence,
+            because an agent has no reliable sense of elapsed time between
+            tool calls.
+
+        Considered delivering the queued messages inline in the piggyback
+        (not just a count): rejected to preserve consume-on-read (cm7vnpqx)
+        and avoid double-delivery — the hint nudges, check_messages drains.
+        Considered a "every N minutes" instruction: rejected (unobservable to
+        the agent). Near-real-time interruption via a harness hook and gating
+        risky actions behind ask(on_timeout="abort") are recorded as further
+        mitigations under pl7nqx4v.
+
     # ─── NAMING ──────────────────────────────────────────────────────────────
 
     Naming = decision:
@@ -1518,6 +1555,39 @@ Confer = goal:
         frequent need. Likely shape: a small verb set parsed after the "."
         sigil, read verbs reusing daemon state already exposed to STATUS, plus
         a few guarded mutating verbs that fan out to agents' inboxes.
+
+    Unsolicited Input Is Pull-Only = tension:
+      id: pl7nqx4v
+      nature: >
+        ask delivers the user's reply by PUSH — the agent is blocked waiting,
+        so the reply returns synchronously with no announcement (the channel's
+        headline promise). But unsolicited input — broadcasts, notify_replies,
+        late_replies — sits in the agent's check_messages queue until the
+        agent chooses to call check_messages. Nothing can inject into a
+        running agent: MCP is client-pull, so confer cannot interrupt an agent
+        that is mid-inference or mid-tool-execution and not calling a confer
+        tool. A head-down agent will not see "stop, wrong track" until its
+        next checkpoint. This bumps against Productivity While Away (pn4xvk2m):
+        agents stay steerable only to the degree they check in.
+      mitigations: >
+        (a) SHIPPED — Pending-Message Piggyback Hint (pb7nqm4x): notify/ask
+        responses carry a pending-count hint, and the instructions nudge
+        event-anchored checks. Turns every existing confer call into a
+        checkpoint. (b) DEFERRED, near-real-time — a Claude Code Stop or
+        PreToolUse hook that calls check_messages between turns, moving the
+        cadence decision to the harness (client-specific; consistent with
+        Spokesperson Abstraction since confer stays a conduit). (c) USAGE
+        CONVENTION — gate risky/irreversible actions behind
+        ask(on_timeout="abort"), which is already push, so the highest-stakes
+        moments are interruptible by construction. Hard ceiling: none of these
+        interrupt an agent mid-execution; the best achievable is "noticed at
+        the next checkpoint," and the mitigations only shrink the gap between
+        checkpoints or move cadence to the harness.
+      revisit-when: >
+        A busy agent misses a time-critical interjection in real use and it
+        costs work, OR daniel wants near-real-time steering enough to wire the
+        harness hook. Likely next step: ship a documented Claude Code hook
+        recipe plus a check-cadence convention.
 
     Policy-Backed Spokesperson Substitution Pending = tension:
       id: vkqmn7p4
