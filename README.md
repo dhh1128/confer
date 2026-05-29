@@ -63,11 +63,15 @@ Logs are written to `$XDG_STATE_HOME/confer/daemon.log` (default `~/.local/state
 
 ## Tools exposed
 
-Phase 2B status — only `notify` is implemented; `ask` and `check_messages` are next.
+All three MCP tools are implemented, plus a user-side `confer` CLI for answering from the laptop. Messages are threaded: each `ask`/`notify` gets a short base32 tag, and the user addresses a thread with `re <tag> …`.
 
 | Tool | Signature | Behavior |
 |------|-----------|----------|
-| `notify` | `notify(message: str) -> str` | DMs `message` to the configured user via the daemon's Discord Gateway connection. Returns `"sent at <ISO timestamp>"` on success or `"<NOTIFY_FAILED: <reason>>"` on failure (no retries). The agent's auto-derived label disambiguates messages from multiple concurrent agents (planned for phase 2C — currently the raw message body is sent unprefixed). |
+| `notify` | `notify(message: str) -> str` | One-way DM to the configured user via the daemon's Discord Gateway. Returns `"sent at <ISO timestamp>"` (with a `(N messages waiting …)` hint if the agent has queued input) or `"<NOTIFY_FAILED: <reason>>"`. Sent as `[<tag>] <label>: <message>`; the auto-derived `repo/branch` label disambiguates concurrent agents, and the tag makes the notify a replyable thread. |
+| `ask` | `ask(question, give_up_after_seconds=1800, on_timeout="use_best_judgment"\|"abort") -> str` | Blocks until the user replies (routed back by thread tag) or the give-up window elapses; bounded 1..86400s. Always returns a natural-language string — the reply, or a timeout directive per `on_timeout`. Never raises across the MCP boundary. |
+| `check_messages` | `check_messages() -> str` | Drains the agent's queue of unsolicited input (broadcasts, replies to its notify threads, late replies), tagged by source. Consume-on-read. Returns a directive when empty. |
+
+The `confer` CLI (`confer list`, `confer answer "re <tag> …"`) lets the user answer pending asks from the workstation without Discord. See `this.i` for the full design rationale (threading, tags, routing).
 
 ## Where things live
 

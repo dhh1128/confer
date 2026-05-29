@@ -1,0 +1,16 @@
+# Dependabot keeps GitHub Actions and Python deps current and surfaces
+# advisories — confer holds a Discord bot token, so silent action/dep drift
+# (including the node20-runtime deprecation class) is a real risk (review DEV-F2).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "github-actions"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "python"]
