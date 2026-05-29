@@ -97,3 +97,34 @@ def test_settings_is_frozen(tmp_path):
     s = Settings.load(cfg)
     with pytest.raises(FrozenInstanceError):
         s.discord_bot_token = "changed"  # type: ignore[misc]
+
+
+def test_re_ping_every_seconds_defaults_to_900(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('discord_bot_token = "x"\nconfer_user_id = 1\n')
+    s = Settings.load(cfg)
+    assert s.re_ping_every_seconds == 900
+
+
+def test_re_ping_every_seconds_can_be_overridden(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'discord_bot_token = "x"\n'
+        "confer_user_id = 1\n"
+        "[ask]\n"
+        "re_ping_every_seconds = 300\n"
+    )
+    s = Settings.load(cfg)
+    assert s.re_ping_every_seconds == 300
+
+
+def test_re_ping_every_seconds_must_be_positive(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'discord_bot_token = "x"\n'
+        "confer_user_id = 1\n"
+        "[ask]\n"
+        "re_ping_every_seconds = 0\n"
+    )
+    with pytest.raises(ValueError, match="re_ping_every_seconds"):
+        Settings.load(cfg)

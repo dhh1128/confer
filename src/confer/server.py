@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -8,8 +8,10 @@ from confer.client import DaemonClient
 
 
 _SERVER_INSTRUCTIONS = """\
-This server pings the user out-of-band via Discord DM when terminal output
-isn't enough. The user may be away from the keyboard for minutes to hours.
+This server lets you reach the user out-of-band when terminal output isn't
+enough. confer routes through Discord today; treat it as an opaque
+spokesperson that delivers your messages and returns answers — don't assume
+how the user is actually responding.
 
 USE the `notify` tool when:
 - A long-running task you started has finished and the user is likely away
@@ -18,7 +20,20 @@ USE the `notify` tool when:
   been idle long enough that they may have context-switched.
 - The user explicitly asked to be told when something happens.
 
-DO NOT use `notify` for:
+USE the `ask` tool when:
+- You need an answer from the user before you can continue, AND
+- The user is likely not at the keyboard right now (else just ask in chat).
+
+When using `ask`, choose on_timeout deliberately:
+- "use_best_judgment" for moderate-stakes questions where you can reasonably
+  proceed if the user is unreachable.
+- "abort" for high-stakes questions (destructive operations, irreversible
+  choices). On timeout you'll be told to stop and surface state.
+You will always receive a natural-language string answer; never a sentinel
+token or an exception. If the answer indicates no human response arrived,
+follow the directive in that string.
+
+DO NOT use `notify` or `ask` for:
 - Routine progress or status inside an active conversation (the terminal
   is the right channel for that).
 - Output the user would see by reading your reply in the chat anyway.
@@ -75,6 +90,59 @@ async def notify(
             "DaemonClient not initialized; server lifespan did not start"
         )
     return await _client.notify(message)
+
+
+_QUESTION_DESCRIPTION = (
+    "The question you want answered. Short, information-dense, phrased as "
+    "a question the user can answer in one or two sentences (often a "
+    "dictated voice reply on mobile). Example: \"Rebase or merge? Conflict "
+    "is in src/auth.py and either is workable.\" Include enough context that "
+    "the user doesn't need to switch back to the laptop to answer. Prefer "
+    "URLs over local file paths when referring to material the user might "
+    "need to look at — the user reads on mobile and can't reach the "
+    "workstation filesystem."
+)
+
+_GIVE_UP_DESCRIPTION = (
+    "Seconds to wait before producing a timeout directive instead of an "
+    "answer. Bounded 1..86400 (24h). Pick proportional to how long the user "
+    "might plausibly be away for this question's importance. Default 1800 "
+    "(30 min) is a reasonable middle ground."
+)
+
+_ON_TIMEOUT_DESCRIPTION = (
+    "What to do if no answer arrives within give_up_after_seconds. "
+    "'use_best_judgment' lets you proceed with a default action; 'abort' "
+    "tells you to stop and surface task state. Pick by stakes: moderate "
+    "questions → use_best_judgment; destructive/irreversible questions → "
+    "abort."
+)
+
+
+@mcp.tool()
+async def ask(
+    question: Annotated[str, Field(description=_QUESTION_DESCRIPTION)],
+    give_up_after_seconds: Annotated[
+        int, Field(description=_GIVE_UP_DESCRIPTION, ge=1, le=86400)
+    ] = 1800,
+    on_timeout: Annotated[
+        Literal["use_best_judgment", "abort"],
+        Field(description=_ON_TIMEOUT_DESCRIPTION),
+    ] = "use_best_judgment",
+) -> str:
+    """Ask confer for an answer on your behalf.
+
+    Returns a natural-language string. Usually the user's reply; on timeout
+    a directive telling you what to do next; on confer-side failure a
+    directive saying you've lost the channel. Always a string — never raises
+    across the MCP boundary. See the server's instructions block for
+    when-to-use guidance.
+    """
+    if _client is None:
+        raise RuntimeError(
+            "DaemonClient not initialized; server lifespan did not start"
+        )
+    return await _client.ask(question, give_up_after_seconds, on_timeout)
 
 
 def main() -> None:

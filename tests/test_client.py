@@ -7,8 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from confer import client as client_mod
-from confer.client import DaemonClient, auto_label
+from confer.client import (
+    DaemonClient,
+    auto_label,
+    _DAEMON_DISCONNECT_DIRECTIVE,
+    _TIMEOUT_DIRECTIVES,
+)
 from confer.protocol import (
+    AskBegin,
+    AskCancel,
+    AskReply,
+    AskTimeout,
     Bye,
     Error,
     Hello,
@@ -471,3 +480,184 @@ async def test_notify_raises_when_daemon_closes_mid_request(tmp_path, monkeypatc
         with pytest.raises(RuntimeError, match="daemon closed"):
             await c.notify("hi")
         await c.close()
+
+
+# ───── ask ─────────────────────────────────────────────────────────────────
+
+
+async def test_ask_returns_user_reply_on_success(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        assert isinstance(ask, AskBegin)
+        assert ask.question == "rebase?"
+        assert ask.give_up_after_seconds == 60
+        assert ask.on_timeout == "use_best_judgment"
+        writer.write(encode(AskReply(request_id=ask.request_id, content="yes please")))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("rebase?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result == "yes please"
+        await c.close()
+
+
+async def test_ask_returns_use_best_judgment_directive_on_timeout(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        writer.write(encode(AskTimeout(request_id=ask.request_id, outcome="use_best_judgment")))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("q?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result == _TIMEOUT_DIRECTIVES["use_best_judgment"]
+        await c.close()
+
+
+async def test_ask_returns_abort_directive_on_timeout(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        writer.write(encode(AskTimeout(request_id=ask.request_id, outcome="abort")))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("q?", give_up_after_seconds=60, on_timeout="abort")
+        assert result == _TIMEOUT_DIRECTIVES["abort"]
+        await c.close()
+
+
+async def test_ask_returns_disconnect_directive_when_daemon_closes(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        await reader.readline()  # consume ASK_BEGIN
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("q?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result == _DAEMON_DISCONNECT_DIRECTIVE
+        await c.close()
+
+
+async def test_ask_returns_disconnect_directive_on_unexpected_response_type(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        # Reply with an Error using the same request_id (matches the future).
+        writer.write(encode(Error(code="x", message="x", request_id=ask.request_id)))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("q?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result == _DAEMON_DISCONNECT_DIRECTIVE
+        await c.close()
+
+
+async def test_ask_sends_ask_cancel_on_cancellation_and_reraises(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+    saw_cancel: list = []
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())  # ASK_BEGIN
+        # Do NOT reply; wait for ASK_CANCEL to arrive.
+        cancel = decode(await reader.readline())
+        if isinstance(cancel, AskCancel):
+            saw_cancel.append(cancel.request_id)
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        task = asyncio.create_task(
+            c.ask("q?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        )
+        await asyncio.sleep(0.05)  # let ASK_BEGIN arrive at the fake daemon
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.05)  # let ASK_CANCEL flow to the fake daemon
+        await c.close()
+
+    assert len(saw_cancel) == 1
+
+
+async def test_close_emits_ask_cancel_for_in_flight_asks():
+    """close() iterates _pending_ask_request_ids and writes ASK_CANCEL for
+    each, before the BYE / writer.close() sequence. Uses a mock writer to
+    avoid coupling to socket teardown semantics."""
+    c = DaemonClient(label_preferred="x")
+    writer = MagicMock()
+    writer.write = MagicMock()
+    writer.drain = AsyncMock()
+    writer.close = MagicMock()
+    writer.wait_closed = AsyncMock()
+    c._writer = writer
+    # Simulate two in-flight asks.
+    c._pending_ask_request_ids = {"r1", "r2"}
+
+    await c.close()
+
+    written = [call.args[0] for call in writer.write.call_args_list]
+    decoded = [decode(line) for line in written]
+    cancels = [m for m in decoded if isinstance(m, AskCancel)]
+    assert {m.request_id for m in cancels} == {"r1", "r2"}
+    # BYE is also sent (terminal message).
+    assert any(isinstance(m, Bye) for m in decoded)
+
+
+async def test_send_ask_cancel_noop_when_writer_none():
+    """Edge case: calling _send_ask_cancel after close() (writer set to None
+    via early return semantics) must not raise."""
+    c = DaemonClient(label_preferred="x")
+    # writer never set
+    await c._send_ask_cancel("nonexistent")  # must not raise

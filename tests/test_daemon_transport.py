@@ -222,3 +222,115 @@ async def test_close_swallows_exceptions_from_connect_task():
 
     transport._client.close.assert_awaited_once()
     assert transport._connect_task.done()
+
+
+async def test_on_user_message_callback_fires_for_matching_dm():
+    received: list[str] = []
+
+    async def callback(content: str) -> None:
+        received.append(content)
+
+    transport = DiscordTransport(token="t", user_id=42, on_user_message=callback)
+    transport._client = MagicMock()
+    await transport._handle_message(_make_dm_message(author_id=42, content="hi"))
+    assert received == ["hi"]
+
+
+async def test_on_user_message_ignored_when_no_callback_registered():
+    transport = DiscordTransport(token="t", user_id=42)
+    transport._client = MagicMock()
+    # Should not raise even though no callback is set.
+    await transport._handle_message(_make_dm_message(author_id=42, content="hi"))
+
+
+async def test_on_user_message_ignores_non_dm_messages():
+    received: list[str] = []
+
+    async def callback(content: str) -> None:
+        received.append(content)
+
+    transport = DiscordTransport(token="t", user_id=42, on_user_message=callback)
+    transport._client = MagicMock()
+    msg = MagicMock()
+    msg.author.id = 42
+    msg.channel = MagicMock(spec=[])  # not a DMChannel
+    await transport._handle_message(msg)
+    assert received == []
+
+
+async def test_on_user_message_ignores_messages_from_wrong_user():
+    received: list[str] = []
+
+    async def callback(content: str) -> None:
+        received.append(content)
+
+    transport = DiscordTransport(token="t", user_id=42, on_user_message=callback)
+    transport._client = MagicMock()
+    await transport._handle_message(_make_dm_message(author_id=99, content="hi"))
+    assert received == []
+
+
+async def test_on_user_message_swallows_callback_exceptions(caplog):
+    import logging
+
+    async def raising_callback(content: str) -> None:
+        raise RuntimeError("callback boom")
+
+    transport = DiscordTransport(
+        token="t", user_id=42, on_user_message=raising_callback
+    )
+    transport._client = MagicMock()
+    with caplog.at_level(logging.ERROR, logger="confer.daemon.transport"):
+        # Should not raise — a misbehaving callback must not tear down the
+        # discord.py event loop.
+        await transport._handle_message(_make_dm_message(author_id=42, content="hi"))
+    assert any(
+        "on_user_message callback failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def _make_dm_message(author_id: int, content: str) -> MagicMock:
+    msg = MagicMock()
+    msg.author.id = author_id
+    msg.content = content
+    msg.channel = MagicMock(spec=discord.DMChannel)
+    return msg
+
+
+async def test_connect_registers_on_message_callback_that_routes_to_handle_message():
+    """Verify the on_message closure created inside connect() actually
+    delegates to _handle_message (covers the inner function body)."""
+    received: list[str] = []
+
+    async def callback(content: str) -> None:
+        received.append(content)
+
+    transport = DiscordTransport(token="t", user_id=42, on_user_message=callback)
+    transport._client = MagicMock()
+    transport._client.login = AsyncMock()
+
+    async def never_returns(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    transport._client.connect = AsyncMock(side_effect=never_returns)
+
+    captured_event_handlers: list = []
+
+    def capture_event(coro):
+        captured_event_handlers.append(coro)
+        return coro
+
+    transport._client.event = capture_event
+
+    await transport.connect()
+    try:
+        assert len(captured_event_handlers) == 1
+        on_message = captured_event_handlers[0]
+        # Invoke the registered handler with a DM from the configured user.
+        await on_message(_make_dm_message(author_id=42, content="hello"))
+        assert received == ["hello"]
+    finally:
+        transport._connect_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await transport._connect_task

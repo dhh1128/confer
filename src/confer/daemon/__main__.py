@@ -35,10 +35,26 @@ def _configure_logging() -> None:
 
 async def _run_daemon() -> None:
     settings = Settings.load()
+    # Forward-reference dance: the transport's on_user_message callback needs
+    # the daemon's _dispatch_user_message, but the daemon needs the transport.
+    # A small closure resolves the order without two-phase construction.
+    daemon_ref: dict = {}
+
+    async def on_user_message(content: str) -> None:
+        daemon = daemon_ref.get("d")
+        if daemon is not None:
+            await daemon._dispatch_user_message(content)
+
     transport = DiscordTransport(
-        token=settings.discord_bot_token, user_id=settings.confer_user_id
+        token=settings.discord_bot_token,
+        user_id=settings.confer_user_id,
+        on_user_message=on_user_message,
     )
-    daemon = Daemon(transport=transport)
+    daemon = Daemon(
+        transport=transport,
+        re_ping_every_seconds=settings.re_ping_every_seconds,
+    )
+    daemon_ref["d"] = daemon
     await daemon.serve(socket_path(), pid_file())
 
 

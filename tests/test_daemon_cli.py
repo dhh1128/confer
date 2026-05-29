@@ -49,23 +49,80 @@ def test_cmd_run_configures_logging_and_runs_daemon(paths):
 
 async def test_run_daemon_loads_settings_and_wires_token_into_transport(paths):
     """Asserts that Settings fields flow through to DiscordTransport so a
-    field rename in Settings would surface as a test failure (S9)."""
-    fake_settings = MagicMock(discord_bot_token="real-tok", confer_user_id=98765)
+    field rename in Settings would surface as a test failure (S9). Also
+    verifies that on_user_message is wired through to the daemon's
+    dispatcher per On Message Handler Wiring (m4kpvn7q)."""
+    fake_settings = MagicMock(
+        discord_bot_token="real-tok",
+        confer_user_id=98765,
+        re_ping_every_seconds=900,
+    )
     fake_transport = MagicMock()
     fake_daemon = MagicMock()
     fake_daemon.serve = AsyncMock()
+    fake_daemon._dispatch_user_message = AsyncMock()
 
     with patch.object(
         cli.Settings, "load", return_value=fake_settings
     ), patch.object(
         cli, "DiscordTransport", return_value=fake_transport
-    ) as mock_transport_cls, patch.object(cli, "Daemon", return_value=fake_daemon):
+    ) as mock_transport_cls, patch.object(cli, "Daemon", return_value=fake_daemon) as mock_daemon_cls:
         await cli._run_daemon()
 
-    mock_transport_cls.assert_called_once_with(
-        token="real-tok", user_id=98765
+    call_kwargs = mock_transport_cls.call_args.kwargs
+    assert call_kwargs["token"] == "real-tok"
+    assert call_kwargs["user_id"] == 98765
+    assert "on_user_message" in call_kwargs
+    # Verify the wired-up closure actually calls into the daemon's dispatcher.
+    await call_kwargs["on_user_message"]("hello from user")
+    fake_daemon._dispatch_user_message.assert_awaited_once_with("hello from user")
+
+    mock_daemon_cls.assert_called_once_with(
+        transport=fake_transport, re_ping_every_seconds=900
     )
     fake_daemon.serve.assert_awaited_once_with(paths["sock"], paths["pid"])
+
+
+async def test_run_daemon_on_user_message_is_noop_before_daemon_assignment(paths):
+    """The closure handles the race where on_user_message fires before the
+    daemon reference is assigned — must not crash."""
+    fake_settings = MagicMock(
+        discord_bot_token="t",
+        confer_user_id=1,
+        re_ping_every_seconds=900,
+    )
+    fake_transport = MagicMock()
+    fake_daemon = MagicMock()
+    fake_daemon.serve = AsyncMock()
+    captured_callback: list = []
+
+    def capture_transport(**kwargs):
+        captured_callback.append(kwargs["on_user_message"])
+        return fake_transport
+
+    with patch.object(
+        cli.Settings, "load", return_value=fake_settings
+    ), patch.object(
+        cli, "DiscordTransport", side_effect=capture_transport
+    ), patch.object(cli, "Daemon", return_value=fake_daemon):
+        # Patch serve to invoke the callback BEFORE the daemon-ref is
+        # populated. Actually the assignment happens before serve() in the
+        # current code, so we exercise the no-daemon-yet branch by directly
+        # calling the captured callback while clearing daemon_ref.
+        await cli._run_daemon()
+
+    # After _run_daemon returns, daemon_ref has been assigned and cleared
+    # from the enclosing scope. Directly invoke captured callback against a
+    # fresh closure scenario by patching the callback's __closure__.
+    callback = captured_callback[0]
+    # Inspect the closure cell: it should reference daemon_ref dict.
+    closure_vars = {
+        name: cell.cell_contents
+        for name, cell in zip(callback.__code__.co_freevars, callback.__closure__)
+    }
+    # If we artificially empty the dict, the callback should be a no-op.
+    closure_vars["daemon_ref"].clear()
+    await callback("anything")  # must not raise
 
 
 def test_configure_logging_creates_directory(paths):

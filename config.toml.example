@@ -9,3 +9,9 @@ discord_bot_token = ""
 # Discord → Settings → Advanced → enable Developer Mode,
 # then right-click your name → Copy User ID.
 confer_user_id = 0
+
+# Optional [ask] tunables (operator-level; agents do not see these).
+# Cadence of "still waiting on your answer to: ..." re-ping DMs while an
+# ask is in flight. Default 900 (15 min). Smaller values nag more often.
+# [ask]
+# re_ping_every_seconds = 900

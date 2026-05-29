@@ -4,11 +4,17 @@ import os
 import shutil
 import subprocess
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from subprocess import DEVNULL
+from typing import Literal
 
 from confer.paths import log_file, socket_path
 from confer.protocol import (
+    AskBegin,
+    AskCancel,
+    AskReply,
+    AskTimeout,
     Bye,
     Hello,
     HelloErr,
@@ -26,6 +32,24 @@ _DAEMON_SPAWN_TIMEOUT = 10.0
 _DAEMON_POLL_INTERVAL = 0.1
 _NOTIFY_FAILURE_PREFIX = "<NOTIFY_FAILED: "
 
+# Natural-language directives returned from `ask()` per Sentinel Returns
+# Not Exceptions (nx2pj4wq) under Natural Language Outcomes (xj4nqv7m).
+_TIMEOUT_DIRECTIVES: dict[str, str] = {
+    "use_best_judgment": (
+        "No answer was received within the requested window. Follow your "
+        "existing instructions or your best judgment about how to proceed."
+    ),
+    "abort": (
+        "No answer was received within the requested window. Stop work on this "
+        "task and leave its state somewhere the user can pick up later "
+        "(e.g., a WIP commit, a status file)."
+    ),
+}
+_DAEMON_DISCONNECT_DIRECTIVE = (
+    "Lost connection to confer; question not answered. Retry or proceed "
+    "without the user's input."
+)
+
 
 class DaemonClient:
     def __init__(self, label_preferred: str | None = None) -> None:
@@ -36,6 +60,7 @@ class DaemonClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future] = {}
+        self._pending_ask_request_ids: set[str] = set()
         self._reader_task: asyncio.Task | None = None
 
     @property
@@ -71,9 +96,66 @@ class DaemonClient:
             return f"{_NOTIFY_FAILURE_PREFIX}unexpected daemon response>"
         return response.info
 
+    async def ask(
+        self,
+        question: str,
+        give_up_after_seconds: int,
+        on_timeout: Literal["use_best_judgment", "abort"],
+    ) -> str:
+        """Send an ASK_BEGIN and await either AskReply or AskTimeout from
+        the daemon. Returns a natural-language directive per Natural Language
+        Outcomes (xj4nqv7m): the user's reply text on success, a timeout
+        directive on timeout, or a disconnect directive if the daemon goes
+        away. CancelledError (typically from agent-side ESC) sends ASK_CANCEL
+        to the daemon before propagating up.
+        """
+        request_id = str(uuid.uuid4())
+        msg = AskBegin(
+            request_id=request_id,
+            question=question,
+            give_up_after_seconds=give_up_after_seconds,
+            on_timeout=on_timeout,
+        )
+        self._pending_ask_request_ids.add(request_id)
+        try:
+            try:
+                response = await self._send_and_wait(msg)
+            except asyncio.CancelledError:
+                await self._send_ask_cancel(request_id)
+                raise
+            except RuntimeError:
+                return _DAEMON_DISCONNECT_DIRECTIVE
+        finally:
+            self._pending_ask_request_ids.discard(request_id)
+            self._pending.pop(request_id, None)
+        if isinstance(response, AskReply):
+            return response.content
+        if isinstance(response, AskTimeout):
+            return _TIMEOUT_DIRECTIVES.get(
+                response.outcome, _DAEMON_DISCONNECT_DIRECTIVE
+            )
+        return _DAEMON_DISCONNECT_DIRECTIVE
+
+    async def _send_ask_cancel(self, request_id: str) -> None:
+        """Fire-and-forget ASK_CANCEL. Per ASK_CANCEL Protocol (3mq7pvxn)
+        the daemon does not respond; do not register a pending future."""
+        if self._writer is None:
+            return
+        with suppress(Exception):
+            self._writer.write(encode(AskCancel(request_id=request_id)))
+            await self._writer.drain()
+
     async def close(self) -> None:
         if self._writer is None:
             return
+        # Per ASK_CANCEL Protocol (3mq7pvxn) graceful-shutdown path: emit
+        # ASK_CANCEL for every in-flight ask so the user sees "Question
+        # withdrawn" rather than "Lost contact" DMs.
+        for request_id in list(self._pending_ask_request_ids):
+            with suppress(Exception):
+                self._writer.write(encode(AskCancel(request_id=request_id)))
+        with suppress(Exception):
+            await self._writer.drain()
         try:
             self._writer.write(encode(Bye()))
             await self._writer.drain()

@@ -45,6 +45,35 @@ class NotifyResult:
 
 
 @dataclass(frozen=True)
+class AskBegin:
+    request_id: str
+    question: str
+    give_up_after_seconds: int
+    on_timeout: Literal["use_best_judgment", "abort"]
+    kind: Literal["ASK_BEGIN"] = "ASK_BEGIN"
+
+
+@dataclass(frozen=True)
+class AskReply:
+    request_id: str
+    content: str
+    kind: Literal["ASK_REPLY"] = "ASK_REPLY"
+
+
+@dataclass(frozen=True)
+class AskTimeout:
+    request_id: str
+    outcome: Literal["use_best_judgment", "abort"]
+    kind: Literal["ASK_TIMEOUT"] = "ASK_TIMEOUT"
+
+
+@dataclass(frozen=True)
+class AskCancel:
+    request_id: str
+    kind: Literal["ASK_CANCEL"] = "ASK_CANCEL"
+
+
+@dataclass(frozen=True)
 class Bye:
     kind: Literal["BYE"] = "BYE"
 
@@ -73,7 +102,19 @@ class StatusResult:
 
 
 Message = Union[
-    Hello, HelloOk, HelloErr, Notify, NotifyResult, Bye, Error, Status, StatusResult
+    Hello,
+    HelloOk,
+    HelloErr,
+    Notify,
+    NotifyResult,
+    AskBegin,
+    AskReply,
+    AskTimeout,
+    AskCancel,
+    Bye,
+    Error,
+    Status,
+    StatusResult,
 ]
 
 
@@ -83,6 +124,10 @@ _MESSAGE_TYPES: dict[str, type] = {
     "HELLO_ERR": HelloErr,
     "NOTIFY": Notify,
     "NOTIFY_RESULT": NotifyResult,
+    "ASK_BEGIN": AskBegin,
+    "ASK_REPLY": AskReply,
+    "ASK_TIMEOUT": AskTimeout,
+    "ASK_CANCEL": AskCancel,
     "BYE": Bye,
     "ERROR": Error,
     "STATUS": Status,

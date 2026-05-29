@@ -29,10 +29,14 @@ def _warn_if_loose_perms(path: Path) -> None:
         )
 
 
+_DEFAULT_RE_PING_EVERY_SECONDS = 900
+
+
 @dataclass(frozen=True)
 class Settings:
     discord_bot_token: str
     confer_user_id: int
+    re_ping_every_seconds: int = _DEFAULT_RE_PING_EVERY_SECONDS
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
@@ -48,9 +52,20 @@ class Settings:
             ) from e
         _warn_if_loose_perms(path)
         try:
+            ask_table = data.get("ask", {})
+            re_ping = int(
+                ask_table.get(
+                    "re_ping_every_seconds", _DEFAULT_RE_PING_EVERY_SECONDS
+                )
+            )
+            if re_ping < 1:
+                raise ValueError(
+                    f"re_ping_every_seconds must be >= 1 (got {re_ping})"
+                )
             return cls(
                 discord_bot_token=data["discord_bot_token"],
                 confer_user_id=int(data["confer_user_id"]),
+                re_ping_every_seconds=re_ping,
             )
         except KeyError as e:
             raise ValueError(

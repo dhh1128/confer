@@ -1,6 +1,10 @@
 import pytest
 
 from confer.protocol import (
+    AskBegin,
+    AskCancel,
+    AskReply,
+    AskTimeout,
     Bye,
     Error,
     Hello,
@@ -103,3 +107,43 @@ def test_decode_raises_on_unknown_kind():
 def test_decode_raises_on_invalid_fields():
     with pytest.raises(ValueError, match="invalid fields"):
         decode(b'{"kind": "HELLO"}')
+
+
+def test_ask_begin_roundtrips():
+    msg = AskBegin(
+        request_id="r1",
+        question="should I rebase or merge?",
+        give_up_after_seconds=1800,
+        on_timeout="use_best_judgment",
+    )
+    assert _roundtrip(msg) == msg
+
+
+def test_ask_begin_with_abort_mode_roundtrips():
+    msg = AskBegin(
+        request_id="r2",
+        question="drop the users table?",
+        give_up_after_seconds=86400,
+        on_timeout="abort",
+    )
+    assert _roundtrip(msg) == msg
+
+
+def test_ask_reply_roundtrips():
+    msg = AskReply(request_id="r1", content="rebase please")
+    assert _roundtrip(msg) == msg
+
+
+def test_ask_timeout_use_best_judgment_roundtrips():
+    msg = AskTimeout(request_id="r1", outcome="use_best_judgment")
+    assert _roundtrip(msg) == msg
+
+
+def test_ask_timeout_abort_roundtrips():
+    msg = AskTimeout(request_id="r1", outcome="abort")
+    assert _roundtrip(msg) == msg
+
+
+def test_ask_cancel_roundtrips():
+    msg = AskCancel(request_id="r1")
+    assert _roundtrip(msg) == msg

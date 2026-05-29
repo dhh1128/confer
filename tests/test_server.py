@@ -85,3 +85,75 @@ def test_main_runs_server():
     with patch.object(server.mcp, "run") as mock_run:
         server.main()
     mock_run.assert_called_once()
+
+
+# ───── ask tool ────────────────────────────────────────────────────────────
+
+
+async def test_mcp_server_registers_ask_tool():
+    tools = await server.mcp.list_tools()
+    tool_names = [t.name for t in tools]
+    assert "ask" in tool_names
+
+
+async def test_ask_tool_docstring_leads_with_spokesperson_framing():
+    tools = await server.mcp.list_tools()
+    ask_tool = next(t for t in tools if t.name == "ask")
+    desc = ask_tool.description or ""
+    first_line = desc.strip().splitlines()[0].lower()
+    # Should reference confer (the spokesperson) rather than the user/Discord
+    assert "confer" in first_line
+    assert "discord" not in first_line
+
+
+async def test_ask_tool_question_parameter_has_description():
+    tools = await server.mcp.list_tools()
+    ask_tool = next(t for t in tools if t.name == "ask")
+    schema = ask_tool.inputSchema
+    assert "description" in schema["properties"]["question"]
+
+
+async def test_ask_tool_give_up_after_seconds_is_bounded():
+    """Per Minimal Agent Surface Operator Config (mk7npq4x): the
+    give_up_after_seconds parameter is enforced by Pydantic with ge=1, le=86400."""
+    tools = await server.mcp.list_tools()
+    ask_tool = next(t for t in tools if t.name == "ask")
+    schema = ask_tool.inputSchema
+    prop = schema["properties"]["give_up_after_seconds"]
+    assert prop.get("minimum") == 1
+    assert prop.get("maximum") == 86400
+
+
+async def test_ask_tool_on_timeout_is_two_modes_only():
+    """The wait_forever / wait_max mode is gone; only use_best_judgment and abort."""
+    tools = await server.mcp.list_tools()
+    ask_tool = next(t for t in tools if t.name == "ask")
+    schema = ask_tool.inputSchema
+    prop = schema["properties"]["on_timeout"]
+    enum = prop.get("enum")
+    assert set(enum) == {"use_best_judgment", "abort"}
+
+
+async def test_ask_tool_delegates_to_daemon_client():
+    fake_client = MagicMock()
+    fake_client.ask = AsyncMock(return_value="yes please")
+
+    with patch.object(server, "_client", fake_client):
+        result = await server.ask("rebase?", 60, "use_best_judgment")
+
+    assert result == "yes please"
+    fake_client.ask.assert_awaited_once_with("rebase?", 60, "use_best_judgment")
+
+
+async def test_ask_tool_raises_when_client_uninitialized():
+    with patch.object(server, "_client", None):
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await server.ask("rebase?", 60, "use_best_judgment")
+
+
+async def test_server_instructions_describe_both_tools_and_spokesperson():
+    instructions = server.mcp.instructions
+    assert "USE the `notify` tool when" in instructions
+    assert "USE the `ask` tool when" in instructions
+    assert "spokesperson" in instructions
+    assert "on_timeout" in instructions
