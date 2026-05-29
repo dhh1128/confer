@@ -88,6 +88,41 @@ class CheckMessagesResult:
 
 
 @dataclass(frozen=True)
+class Inject:
+    """User-side CLI message: route this content as if it had arrived via
+    Discord. HELLO-exempt per CLI Inject Tool (ci7n4pvm)."""
+    request_id: str
+    content: str
+    kind: Literal["INJECT"] = "INJECT"
+
+
+@dataclass(frozen=True)
+class InjectResult:
+    request_id: str
+    outcome: Literal[
+        "delivered", "queued_labeled", "broadcast", "bounced", "ambiguous"
+    ]
+    detail: str
+    kind: Literal["INJECT_RESULT"] = "INJECT_RESULT"
+
+
+@dataclass(frozen=True)
+class ListAsks:
+    """User-side CLI message: ask the daemon for a formatted view of pending
+    asks. HELLO-exempt per CLI Inject Tool (ci7n4pvm)."""
+    request_id: str
+    kind: Literal["LIST_ASKS"] = "LIST_ASKS"
+
+
+@dataclass(frozen=True)
+class ListAsksResult:
+    request_id: str
+    formatted: str
+    count: int
+    kind: Literal["LIST_ASKS_RESULT"] = "LIST_ASKS_RESULT"
+
+
+@dataclass(frozen=True)
 class Bye:
     kind: Literal["BYE"] = "BYE"
 
@@ -127,6 +162,10 @@ Message = Union[
     AskCancel,
     CheckMessages,
     CheckMessagesResult,
+    Inject,
+    InjectResult,
+    ListAsks,
+    ListAsksResult,
     Bye,
     Error,
     Status,
@@ -146,6 +185,10 @@ _MESSAGE_TYPES: dict[str, type] = {
     "ASK_CANCEL": AskCancel,
     "CHECK_MESSAGES": CheckMessages,
     "CHECK_MESSAGES_RESULT": CheckMessagesResult,
+    "INJECT": Inject,
+    "INJECT_RESULT": InjectResult,
+    "LIST_ASKS": ListAsks,
+    "LIST_ASKS_RESULT": ListAsksResult,
     "BYE": Bye,
     "ERROR": Error,
     "STATUS": Status,

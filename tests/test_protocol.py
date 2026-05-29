@@ -12,6 +12,10 @@ from confer.protocol import (
     Hello,
     HelloErr,
     HelloOk,
+    Inject,
+    InjectResult,
+    ListAsks,
+    ListAsksResult,
     Notify,
     NotifyResult,
     Status,
@@ -160,6 +164,32 @@ def test_check_messages_result_roundtrips():
     msg = CheckMessagesResult(
         request_id="r1",
         formatted="[1] 2026-05-29 broadcast: hello there",
+        count=1,
+    )
+    assert _roundtrip(msg) == msg
+
+
+def test_inject_roundtrips():
+    msg = Inject(request_id="r1", content="yes please")
+    assert _roundtrip(msg) == msg
+
+
+def test_inject_result_roundtrips():
+    msg = InjectResult(
+        request_id="r1", outcome="delivered", detail="Delivered to confer/main."
+    )
+    assert _roundtrip(msg) == msg
+
+
+def test_list_asks_roundtrips():
+    msg = ListAsks(request_id="r1")
+    assert _roundtrip(msg) == msg
+
+
+def test_list_asks_result_roundtrips():
+    msg = ListAsksResult(
+        request_id="r1",
+        formatted="1. [confer/main] rebase or merge?",
         count=1,
     )
     assert _roundtrip(msg) == msg

@@ -30,6 +30,10 @@ from confer.protocol import (
     Hello,
     HelloErr,
     HelloOk,
+    Inject,
+    InjectResult,
+    ListAsks,
+    ListAsksResult,
     Notify,
     NotifyResult,
     Status,
@@ -1044,6 +1048,198 @@ def test_format_queue_for_check_messages_unknown_source_tag_falls_back():
     )
     # Smoke: known source renders the tag.
     assert "late-reply" in _format_queue_for_check_messages(q)
+
+
+# ─── CLI inject path (phase 3) ────────────────────────────────────────────
+
+
+async def test_inject_delivered_to_single_pending_ask():
+    daemon = _make_daemon()
+    writer_ask, pending = await _register_ask(daemon)
+    cli_writer = _writer_mock()
+
+    await daemon._handle_inject("req-cli", "yes please", cli_writer)
+
+    # CLI got an InjectResult with outcome=delivered.
+    cli_sent = _written_messages(cli_writer)
+    result = next(m for m in cli_sent if isinstance(m, InjectResult))
+    assert result.outcome == "delivered"
+    assert "confer/main" in result.detail
+    # The agent's writer got an AskReply.
+    ask_sent = _written_messages(writer_ask)
+    reply = next((m for m in ask_sent if isinstance(m, AskReply)), None)
+    assert reply is not None
+    assert reply.content == "yes please"
+
+
+async def test_inject_bounced_does_not_send_discord_dm():
+    """CLI inject path with no agents: outcome=bounced, but the daemon must
+    NOT send a Discord feedback DM (CLI user reads the bounce in terminal)."""
+    daemon = _make_daemon()
+    cli_writer = _writer_mock()
+
+    await daemon._handle_inject("req-cli", "anyone there?", cli_writer)
+
+    cli_sent = _written_messages(cli_writer)
+    result = next(m for m in cli_sent if isinstance(m, InjectResult))
+    assert result.outcome == "bounced"
+    assert "No agent is connected" in result.detail
+    daemon._transport.notify.assert_not_awaited()
+
+
+async def test_inject_broadcast_queues_to_all_clients():
+    daemon = _make_daemon()
+    daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
+    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=_writer_mock())
+    cli_writer = _writer_mock()
+
+    await daemon._handle_inject("req-cli", "BTW use library X", cli_writer)
+
+    cli_sent = _written_messages(cli_writer)
+    result = next(m for m in cli_sent if isinstance(m, InjectResult))
+    assert result.outcome == "broadcast"
+    assert "2 connected agent" in result.detail
+    for label in ("confer/main", "myapp/feat"):
+        msgs = list(daemon._queues[label])
+        assert len(msgs) == 1
+        assert msgs[0].source == "broadcast"
+
+
+async def test_inject_queued_labeled_routes_to_specific_client():
+    daemon = _make_daemon()
+    daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
+    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=_writer_mock())
+    cli_writer = _writer_mock()
+
+    await daemon._handle_inject("req-cli", "confer: BTW use X", cli_writer)
+
+    cli_sent = _written_messages(cli_writer)
+    result = next(m for m in cli_sent if isinstance(m, InjectResult))
+    assert result.outcome == "queued_labeled"
+    assert "confer/main" in result.detail
+
+
+async def test_inject_ambiguous_returns_outcome_without_discord_dm():
+    daemon = _make_daemon()
+    w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
+    w2 = _writer_mock()
+    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=w2)
+    await daemon._handle_ask_begin(
+        AskBegin(
+            request_id="r2", question="merge?",
+            give_up_after_seconds=60, on_timeout="use_best_judgment",
+        ),
+        w2, "myapp/feat",
+    )
+    daemon._transport.notify.reset_mock()
+    cli_writer = _writer_mock()
+
+    await daemon._handle_inject("req-cli", "hello", cli_writer)
+
+    cli_sent = _written_messages(cli_writer)
+    result = next(m for m in cli_sent if isinstance(m, InjectResult))
+    assert result.outcome == "ambiguous"
+    assert "Multiple asks waiting" in result.detail
+    daemon._transport.notify.assert_not_awaited()
+
+    await daemon._handle_ask_cancel("r1")
+    await daemon._handle_ask_cancel("r2")
+
+
+async def test_list_asks_empty():
+    daemon = _make_daemon()
+    cli_writer = _writer_mock()
+    await daemon._handle_list_asks("r1", cli_writer)
+    sent = _written_messages(cli_writer)
+    result = next(m for m in sent if isinstance(m, ListAsksResult))
+    assert result.count == 0
+    assert "No pending asks" in result.formatted
+
+
+async def test_list_asks_returns_numbered_list_newest_first():
+    daemon = _make_daemon()
+    w1, p1 = await _register_ask(
+        daemon, request_id="r1", label="confer/main", question="rebase?",
+    )
+    w2 = _writer_mock()
+    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=w2)
+    # Second ask is newer (started_at is monotonic, second registered later).
+    await daemon._handle_ask_begin(
+        AskBegin(
+            request_id="r2", question="drop table?",
+            give_up_after_seconds=60, on_timeout="abort",
+        ),
+        w2, "myapp/feat",
+    )
+    cli_writer = _writer_mock()
+
+    await daemon._handle_list_asks("req-cli", cli_writer)
+
+    sent = _written_messages(cli_writer)
+    result = next(m for m in sent if isinstance(m, ListAsksResult))
+    assert result.count == 2
+    # Newest-first: r2 (myapp/feat) before r1 (confer/main).
+    lines = result.formatted.splitlines()
+    feat_idx = next(i for i, line in enumerate(lines) if "myapp/feat" in line)
+    main_idx = next(i for i, line in enumerate(lines) if "confer/main" in line)
+    assert feat_idx < main_idx
+
+    await daemon._handle_ask_cancel("r1")
+    await daemon._handle_ask_cancel("r2")
+
+
+async def test_inject_message_is_hello_exempt():
+    """CLI messages don't HELLO. The daemon must process INJECT from an
+    unregistered (no client_label) writer without firing hello_required."""
+    daemon = _make_daemon()
+    writer = _writer_mock()
+    await daemon._dispatch(
+        Inject(request_id="r1", content="hi"), writer, client_label=None
+    )
+    sent = _written_messages(writer)
+    # No hello_required Error; we got an InjectResult instead.
+    assert not any(
+        isinstance(m, Error) and m.code == "hello_required" for m in sent
+    )
+    assert any(isinstance(m, InjectResult) for m in sent)
+
+
+async def test_list_asks_message_is_hello_exempt():
+    daemon = _make_daemon()
+    writer = _writer_mock()
+    await daemon._dispatch(
+        ListAsks(request_id="r1"), writer, client_label=None
+    )
+    sent = _written_messages(writer)
+    assert not any(
+        isinstance(m, Error) and m.code == "hello_required" for m in sent
+    )
+    assert any(isinstance(m, ListAsksResult) for m in sent)
+
+
+def test_format_pending_asks_for_list_empty():
+    from confer.daemon.core import _format_pending_asks_for_list
+    assert "No pending asks" in _format_pending_asks_for_list([])
+
+
+def test_format_pending_asks_for_list_with_entries():
+    from confer.daemon.core import _format_pending_asks_for_list
+    asks = [
+        _PendingAsk(
+            request_id="r1", label="confer/main", question="rebase?",
+            on_timeout="use_best_judgment", give_up_after_seconds=60,
+            started_at=2.0, writer=MagicMock(),
+        ),
+        _PendingAsk(
+            request_id="r2", label="myapp/feat", question="merge?",
+            on_timeout="abort", give_up_after_seconds=60,
+            started_at=1.0, writer=MagicMock(),
+        ),
+    ]
+    formatted = _format_pending_asks_for_list(asks)
+    assert "2 pending ask" in formatted
+    assert "rebase?" in formatted
+    assert "merge?" in formatted
 
 
 async def test_dispatch_user_message_ambiguous_sends_disambiguation_dm():

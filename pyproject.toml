@@ -10,6 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
+confer = "confer.cli:main"
 confer-server = "confer.server:main"
 confer-daemon = "confer.daemon.__main__:main"
 

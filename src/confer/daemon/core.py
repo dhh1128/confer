@@ -34,6 +34,10 @@ from confer.protocol import (
     Hello,
     HelloErr,
     HelloOk,
+    Inject,
+    InjectResult,
+    ListAsks,
+    ListAsksResult,
     Message,
     Notify,
     NotifyResult,
@@ -113,6 +117,19 @@ _SOURCE_TAGS = {
     "labeled_interjection": "for-you",
     "broadcast": "broadcast",
 }
+
+
+def _format_pending_asks_for_list(asks) -> str:
+    """Render pending asks (newest-first) as a numbered list suitable for
+    the CLI `confer list` output. The numeric prefix lines up with
+    7kxpvnqj rule (2): `confer answer "N your text"` routes to the Nth
+    ask."""
+    if not asks:
+        return "No pending asks."
+    lines = [f"{len(asks)} pending ask(s) (newest first):", ""]
+    for i, ask in enumerate(asks, start=1):
+        lines.append(f"  {i}. [{ask.label}] {ask.question}")
+    return "\n".join(lines)
 
 
 def _format_queue_for_check_messages(queue) -> str:
@@ -338,6 +355,14 @@ class Daemon:
                 ),
             )
             return None
+        # CLI-side messages: HELLO-exempt per CLI Inject Tool (ci7n4pvm)
+        # and the STATUS precedent in xn7pqv4m.
+        if isinstance(msg, Inject):
+            await self._handle_inject(msg.request_id, msg.content, writer)
+            return None
+        if isinstance(msg, ListAsks):
+            await self._handle_list_asks(msg.request_id, writer)
+            return None
         if isinstance(msg, Bye):
             return None
         if client_label is None:
@@ -411,21 +436,39 @@ class Daemon:
 
     async def _dispatch_user_message(self, content: str) -> None:
         """Called from DiscordTransport's on_message handler whenever a DM
-        arrives from the configured user. Routes via route_user_message and
-        acts on the decision."""
+        arrives from the configured user. Routes the content and, for
+        bounce/ambiguous outcomes, replies on the Discord side so the user
+        sees the explanation on the same channel they used to send."""
+        outcome, detail, _ = await self._route_and_act(content)
+        if outcome in ("bounced", "ambiguous"):
+            await self._send_dm_best_effort(detail)
+
+    async def _route_and_act(self, content: str) -> tuple[str, str, object]:
+        """Shared core: apply Reply Routing Rules, perform the
+        queue/deliver side effects, and return (outcome_tag, detail_text,
+        decision). Side effects performed unconditionally; the caller
+        decides whether to send a Discord feedback DM (Discord path) or
+        return the detail via the calling channel (CLI inject path) per
+        CLI Inject Tool (ci7n4pvm)."""
         snapshot = [self._to_routing_ask(p) for p in self._pending_asks.values()]
         connected_labels = list(self._clients.keys())
         decision = route_user_message(content, snapshot, connected_labels)
         if isinstance(decision, Deliver):
             await self._deliver_reply(decision.label, decision.content)
-        elif isinstance(decision, EnqueueLabeled):
+            return ("delivered", f"Delivered to {decision.label}.", decision)
+        if isinstance(decision, EnqueueLabeled):
             self._enqueue_message(
                 decision.label,
                 decision.content,
                 source="labeled_interjection",
                 original_question=None,
             )
-        elif isinstance(decision, Broadcast):
+            return (
+                "queued_labeled",
+                f"Queued for {decision.label}.",
+                decision,
+            )
+        if isinstance(decision, Broadcast):
             for label in connected_labels:
                 self._enqueue_message(
                     label,
@@ -433,13 +476,46 @@ class Daemon:
                     source="broadcast",
                     original_question=None,
                 )
-        elif isinstance(decision, Bounce):
-            await self._send_dm_best_effort(decision.text)
-        else:
-            # RouteDecision union is closed; the remaining variant is Ambiguous.
-            await self._send_dm_best_effort(
-                self._format_ambiguous_dm(decision.pending_asks)
+            return (
+                "broadcast",
+                f"Broadcast to {len(connected_labels)} connected agent(s).",
+                decision,
             )
+        if isinstance(decision, Bounce):
+            return ("bounced", decision.text, decision)
+        # Ambiguous
+        return (
+            "ambiguous",
+            self._format_ambiguous_dm(decision.pending_asks),
+            decision,
+        )
+
+    async def _handle_inject(
+        self, request_id: str, content: str, writer: asyncio.StreamWriter
+    ) -> None:
+        """Handle a CLI-side INJECT message. Performs the same routing as a
+        Discord-arrived message, but returns the outcome via INJECT_RESULT
+        rather than sending a feedback DM (the CLI user reads the outcome
+        in their terminal)."""
+        outcome, detail, _ = await self._route_and_act(content)
+        await self._send(
+            writer,
+            InjectResult(request_id=request_id, outcome=outcome, detail=detail),
+        )
+
+    async def _handle_list_asks(
+        self, request_id: str, writer: asyncio.StreamWriter
+    ) -> None:
+        """Handle a CLI-side LIST_ASKS message. Returns a formatted view of
+        pending asks for the user to choose from when answering via CLI."""
+        asks = self._pending_asks_newest_first()
+        formatted = _format_pending_asks_for_list(asks)
+        await self._send(
+            writer,
+            ListAsksResult(
+                request_id=request_id, formatted=formatted, count=len(asks)
+            ),
+        )
 
     async def _handle_check_messages(
         self, request_id: str, client_label: str, writer: asyncio.StreamWriter
