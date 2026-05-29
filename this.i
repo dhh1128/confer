@@ -580,6 +580,58 @@ Confer = goal:
         dependency-injection shape supports the daemon as the routing
         authority while keeping the transport testable in isolation.
 
+    CLI Inject Tool = decision:
+      id: ci7n4pvm
+      why: >
+        Resolves CLI Answer Injection Pending (7pvkn4qm). New top-level
+        `confer` binary with two subcommands:
+
+          confer list           # show pending asks the user can answer
+          confer answer "text"  # apply Reply Routing Rules (7kxpvnqj) to
+                                # the text and report the outcome
+
+        Connects to the same Unix socket as the MCP client, but does NOT
+        send HELLO — the CLI is not an MCP-spawned client and has no
+        meaningful agent label. Two new protocol messages
+        (Inject / InjectResult and ListAsks / ListAsksResult) are exempt
+        from the hello_required rule per the STATUS precedent (xn7pqv4m
+        excludes daemon-internal queries from registration).
+
+        Daemon-side behavior: the Inject message's content is fed directly
+        into the same _dispatch_user_message path that handles Discord
+        DMs. The same RouteDecision union applies — Deliver, EnqueueLabeled,
+        Broadcast, Bounce, Ambiguous — so the CLI gets exactly the same
+        routing semantics the user already learned for Discord. The
+        InjectResult carries an outcome tag (delivered, queued_labeled,
+        broadcast, bounced, ambiguous) plus a human-readable detail
+        string the CLI prints.
+
+        Considered making the CLI HELLO with a special "cli/local" label:
+        rejected because the CLI is not an entity that should appear in
+        the routing graph as a candidate recipient — it's a user-side
+        injector. The STATUS-style HELLO exemption is the right pattern.
+
+        Considered embedding the inject capability inside `confer-daemon`
+        (which already has a CLI for run/stop/status): rejected because
+        daemon-control and user-injection are different audiences with
+        different invocation cadences (one-shot user actions vs.
+        operational lifecycle). Separate binaries keep each surface
+        focused.
+
+        Considered structured `confer answer <ask-id> "text"` with
+        ask-id-as-argument: rejected because the user already has the
+        Discord routing-rules vocabulary in their head (label prefix,
+        numeric shortcut, single-ask shortcut). Reusing those rules in
+        the CLI means zero additional cognitive load. The CLI's only
+        novel surface is `confer list` to surface what asks exist when
+        the user can't see the Discord side.
+
+        Derivative of Spokesperson Abstraction Principle (vj4xqn7p) —
+        the same routing engine accepts content from any channel — and
+        Productivity While Away (pn4xvk2m) — keeps daniel productive
+        when he returns to his laptop with a Discord notification he
+        missed.
+
     Reply Routing Parser = decision:
       id: nqx7pmv4
       why: >
@@ -1242,10 +1294,15 @@ Confer = goal:
         Abstraction Principle (vj4xqn7p) — and unblock the agent without
         losing context. Phase 2C does not build this; the principle exists
         only to keep the ingestion seam shaped to accept it later.
-      revisit-when: >
-        daniel encounters the laptop-blocked-on-Discord scenario in real use
-        at least twice, OR a second non-Discord input source (policy engine,
-        secondary agent) is added and motivates the same ingestion seam.
+      resolution: >
+        Resolved in phase 3 by CLI Inject Tool (ci7n4pvm) — ahead of the
+        original revisit-when criteria because daniel asked for phase 3
+        work and CLI was the strongest intent-aligned fit. The
+        Spokesperson Abstraction seam designed in 2C absorbed the new
+        channel cleanly: the daemon's _dispatch_user_message accepts
+        (label, content) from any source, and the CLI sends the same
+        routing-rule-compatible content as a Discord DM would.
+      resolved-by: dh, 2026-05-29
 
     Policy-Backed Spokesperson Substitution Pending = tension:
       id: vkqmn7p4
