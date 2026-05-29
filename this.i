@@ -1652,6 +1652,112 @@ Confer = goal:
         approval pattern across many similar asks), OR a second user-side
         responder (secondary agent, scripted handler) becomes desired.
 
+    # ─── REVIEW-PANEL FINDINGS (post-G3, 2026-05-29) ─────────────────────────
+    # The four-persona review-panel over confer@main surfaced these; the
+    # recommend-fix items were fixed in code. The deferred / accept-risk items
+    # are recorded here so they are tracked rather than lost.
+
+    Local Inject Is Forgeable = tension:
+      id: rv7knqp2
+      nature: >
+        Review SEC-F1. The CLI inject path (Inject / ListAsks) is HELLO-exempt
+        and authenticated only by Unix-socket file permissions, so any local
+        process that can open the socket can forge user messages to agents
+        (reply to asks, broadcast).
+      resolution: >
+        Accepted within the recorded single-user threat model: IPC Protocol
+        NDJSON Over Persistent Unix Socket (kp5w2nfx) makes file permissions
+        (0600, user-owned) the access control by design — a hostile local
+        process running as daniel already has full reach. No in-band auth
+        token is added.
+      revisit-when: >
+        confer ever runs on a shared/multi-user host, or the socket is exposed
+        beyond the owning user — at which point an in-band capability token on
+        Inject/ListAsks (and HELLO) is warranted.
+      resolved-by: dh, 2026-05-29
+
+    Daemon Log And State Dir Perms = tension:
+      id: lp7nqkx4
+      nature: >
+        Review DEV-F5. The daemon log and state directory are created with
+        default umask perms, so DM content written to the log can be readable
+        by other local users on a multi-user box.
+      resolution: >
+        Accepted within the single-user threat model (same basis as rv7knqp2
+        / kp5w2nfx). The socket itself is already forced to 0600; the log/state
+        dir perms are the lower-stakes sibling.
+      revisit-when: >
+        Shared-host deployment, OR the log is found to contain material more
+        sensitive than already-sent DM text. Likely fix: create the state dir
+        0700 and the log 0600 explicitly.
+      resolved-by: dh, 2026-05-29
+
+    DM Content Is A Prompt-Injection Surface = tension:
+      id: pj7nqmx4
+      nature: >
+        Review SEC-F3. Discord DM content flows verbatim into agent context,
+        gated only by author.id matching the configured user. A compromised or
+        spoofed-content path could inject instructions an agent then acts on.
+        This is largely inherent to the tool's purpose (relaying the user's
+        words to the agent), but it is a real surface worth naming.
+      revisit-when: >
+        confer relays content from any source other than the single trusted
+        user (policy engine, secondary agent, group channel — see vj4xqn7p /
+        vkqmn7p4), at which point inbound content needs treating as untrusted
+        data rather than trusted instructions.
+
+    CI Actions Not SHA-Pinned = tension:
+      id: aq4nvx7p
+      nature: >
+        Review SEC-F2. GitHub Actions in ci.yml / copilot-review-gate.yml are
+        referenced by mutable tag (e.g. @v6, @v7), not pinned to a commit SHA,
+        so a compromised or retagged upstream action could run in CI.
+      revisit-when: >
+        The repo handles anything more sensitive in CI than running tests, OR
+        a supply-chain policy is adopted. Likely fix: pin each action to a
+        full commit SHA with a version comment, and let dependabot (DEV-F2,
+        now configured) bump the pins.
+
+    No Secret-Scanning Gate = tension:
+      id: ss4kqnv7
+      nature: >
+        Review DEV-F4. Neither CI nor the pre-commit hook scans for committed
+        secrets or invisible-Unicode payloads, so an accidental token commit
+        or a hidden-character injection would not be caught automatically —
+        notable for a tool that holds a Discord bot token.
+      revisit-when: >
+        A near-miss occurs, OR the project gains external contributors. Likely
+        fix: a gitleaks (or equivalent) CI step and a pre-commit hook addition.
+
+    Successful Reply Routing Is Silent = tension:
+      id: sr4nqpv7
+      nature: >
+        Review UX-F1. Delivered / broadcast / notify-reply outcomes produce no
+        Discord acknowledgement, so an away user can't tell their dictated
+        reply landed (or landed on the right thread), in mild tension with
+        Acknowledge Actionable State Changes (qn7pkm4v). The agent's follow-up
+        action is a plausible implicit ack, so this is a product call, not an
+        automatic fix.
+      revisit-when: >
+        A real away-from-keyboard session shows daniel re-sending or asking
+        "did that go through?", OR a mis-prefixed reply silently hits the
+        wrong thread. Likely fix: a brief reaction/ack DM on successful routing
+        (weighed against the no-noise intent of qn7pkm4v).
+
+    Expired Tag Reply Has No Bounce = tension:
+      id: et7knqp4
+      nature: >
+        Review UX-F4. A "re <tag>" to an evicted/closed notify thread (per the
+        per-label cap or post-disconnect drop in Notify Replyable Threads,
+        nr4kpq7v) matches nothing and falls through to generic routing
+        (broadcast / lone-ask) or the generic no-agents bounce; the user
+        cannot distinguish an expired tag from a typo.
+      revisit-when: >
+        Notify-thread eviction or post-disconnect tag replies become common
+        enough to confuse in practice. Likely fix: a thread-specific bounce
+        ("that thread is no longer open") when a tag-shaped token matches no
+        active thread.
+
     # ─── PROMPT AUDIT HISTORY ────────────────────────────────────────────────
 
     Prompt Audit History = constraint:
