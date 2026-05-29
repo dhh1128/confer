@@ -599,12 +599,24 @@ Confer = goal:
 
         Daemon-side behavior: the Inject message's content is fed directly
         into the same _dispatch_user_message path that handles Discord
-        DMs. The same RouteDecision union applies — Deliver, EnqueueLabeled,
-        Broadcast, Bounce, Ambiguous — so the CLI gets exactly the same
-        routing semantics the user already learned for Discord. The
-        InjectResult carries an outcome tag (delivered, queued_labeled,
-        broadcast, bounced, ambiguous) plus a human-readable detail
+        DMs. The same RouteDecision union applies, so the CLI gets exactly
+        the same routing semantics the user already learned for Discord. The
+        InjectResult carries an outcome tag plus a human-readable detail
         string the CLI prints.
+
+        Outcome set (corrected post-G3; review finding TST-F2): the daemon
+        emits exactly delivered, queued_notify_reply, broadcast, bounced,
+        ambiguous, concierge. (The pre-G3 draft of this node listed
+        "queued_labeled" from the dropped label-addressing path, rt7nqp4m;
+        that outcome no longer exists, and notify-reply queueing, nr4kpq7v,
+        plus the concierge stub, cg7vnq4p, were never recorded here. The
+        InjectResult.outcome Literal and this node are now reconciled to the
+        emitted set, with a test enumerating every daemon-emitted outcome
+        against the Literal so the contract cannot silently drift again.)
+        CLI exit-code mapping: delivered / queued_notify_reply / broadcast
+        exit 0 (the message reached an agent or a queue); bounced / ambiguous
+        / concierge exit non-zero (nothing was delivered to an agent), so a
+        script branching on `confer answer` exit status behaves correctly.
 
         Considered making the CLI HELLO with a special "cli/local" label:
         rejected because the CLI is not an entity that should appear in
@@ -1326,6 +1338,15 @@ Confer = goal:
         cleanly — slicing below discord.py adds friction without benefit.
         Considered no integration tests: would let breaking Discord API changes
         ship undetected. Two layers is the minimum that covers the threat model.
+
+        Testability addendum (review finding TST-F1/F3): the daemon's timing
+        layer (timeout + re-ping loops) takes injectable clock and sleep
+        callables (default time.monotonic / asyncio.sleep). Unit tests drive
+        the loops in isolation with a fake clock/sleep so the production
+        constants (the 60s skip-near-deadline window, the re-ping cadence)
+        are exercised deterministically instead of via fragile wall-clock
+        margins that flake on a loaded runner. The skip-near-deadline
+        decision is also a pure helper unit-tested across the 60s boundary.
 
     # ─── OPEN TENSIONS ───────────────────────────────────────────────────────
 
