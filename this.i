@@ -915,6 +915,21 @@ Confer = goal:
         acid test (a clean Claude in a worktree-isolated context given
         mixed-shape tasks) tracked in gaps.md as G2.
 
+        G2 RESULT (2026-05-29): the acid test ran against the full
+        notify/ask/check_messages surface — a confer-naive subagent given
+        only this self-description scored 11/11 on tool discrimination
+        (including don't-use-confer cases), validating the policy. It also
+        surfaced two wording refinements, since applied: (a) a stale notify
+        "USE when" bullet ("you hit a blocker that needs the user's input")
+        was misleading now that ask exists — notify is one-way, so a
+        reply-needed blocker is an ask; reworded to say notify is for things
+        that do NOT need a reply. (b) on_timeout="abort" guidance, framed
+        only around destructiveness, now also names "no safe default exists
+        / cannot proceed without an answer" as an abort trigger. G2 is
+        closed; the acid test is tracked as a recurring audit in Prompt
+        Audit History (vp4nm7qx). The rename question (3pqvn7mw) is resolved
+        against renaming on this evidence.
+
     notify Fail Fast = decision:
       id: 3kpwn7mj
       why: >
@@ -1471,6 +1486,17 @@ Confer = goal:
         notify in ways that better description did not catch, OR daniel
         observes notify misuse in real multi-agent use over a 2-week
         window.
+      resolution: >
+        Resolved (rename NOT needed) by the G2 acid test, 2026-05-29. A
+        confer-naive subagent given only the agent-facing self-description
+        scored 11/11 on a mixed notify/ask/check_messages discrimination
+        battery, including the don't-use-confer cases. No name-priming
+        misuse of "notify" appeared — the agent did not over-reach it as a
+        generic "tell the user" channel. The bet in Notify Self-Description
+        Policy (4kxp7qnj) — fix description before considering a rename —
+        is validated; "notify" stays. Reopen only if real multi-agent use
+        surfaces name-driven misuse the description cannot correct.
+      resolved-by: dh, 2026-05-29
 
     Async Polling Loop Flakiness Risk = tension:
       id: 3vxm7qnp
@@ -1611,11 +1637,18 @@ Confer = goal:
       id: vp4nm7qx
       why: >
         Tracks last-run dates and finding summaries for adversarial-review
-        personas, so gate ceremonies can identify overdue audits and
-        recommend them before gate closes. Introduced at the phase 2B gate,
-        after the first adversarial review. Cadence "every-3-phases" is a
-        starting heuristic; adjust based on whether findings density grows
-        or shrinks over time.
+        personas AND the self-description acid test, so gate ceremonies can
+        identify overdue audits and recommend them before gate closes.
+        Introduced at the phase 2B gate, after the first adversarial review.
+        Cadence "every-3-phases" is a starting heuristic; adjust based on
+        whether findings density grows or shrinks over time. The
+        self-description acid test (self-description-acid-test below) is part
+        of the component's testability strategy (a third tier beyond the
+        unit + integration layers of Two-Layer Test Strategy, 7vpm2qkx): it
+        is a qualitative, LLM-behavioral check that the agent-facing
+        self-description drives correct tool usage — run it whenever the
+        agent-facing surface changes (a new/renamed tool, a reworked
+        instructions block) and at least every few phases regardless.
       children:
         security-hawk:
           id: 5pqnx7vk
@@ -1658,3 +1691,18 @@ Confer = goal:
             user direction. RuntimeWarning suppression explicitly NOT
             added — the warning is signal we want to keep.
           recommended-cadence: every-3-phases
+        self-description-acid-test:
+          id: sd7acidq
+          last-run: 2026-05-29
+          phase: G2
+          finding-summary: >
+            A confer-naive general-purpose subagent, given only the exact
+            agent-facing self-description (server instructions + tool
+            schemas) and an 11-scenario mixed battery, scored 11/11 on
+            notify/ask/check_messages discrimination — including the
+            don't-use-confer cases, the on_timeout stakes call, and the
+            terse-reply vocabulary. No "notify" name-priming misuse (resolved
+            tension 3pqvn7mw). Two wording refinements applied: stale
+            notify-blocker bullet reworded (one-way vs reply-needed), and
+            an "no safe default" abort trigger added to on_timeout guidance.
+          recommended-cadence: on-agent-surface-change-or-every-3-phases
