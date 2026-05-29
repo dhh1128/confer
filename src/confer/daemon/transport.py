@@ -30,7 +30,13 @@ class DiscordTransport:
         self._on_user_message = on_user_message
         intents = discord.Intents.default()
         intents.dm_messages = True
-        intents.message_content = True
+        # Do NOT enable intents.message_content. It is a PRIVILEGED intent that
+        # must be toggled on in the Discord developer portal; requesting it
+        # without that toggle makes the Gateway reject the connection outright
+        # (PrivilegedIntentsRequired). confer does not need it: Discord always
+        # populates message content for DMs (and @-mentions) regardless of the
+        # privileged intent, and confer only reads DMs from the configured
+        # user. dm_messages alone delivers those events with content intact.
         self._client = discord.Client(intents=intents)
         self._dm_channel: discord.DMChannel | None = None
         self._connect_task: asyncio.Task | None = None

@@ -13,6 +13,16 @@ def _make_transport_with_mocked_client() -> DiscordTransport:
     return transport
 
 
+def test_transport_does_not_request_privileged_message_content_intent():
+    """message_content is a PRIVILEGED intent; requesting it without enabling
+    it in the developer portal makes the Gateway reject the connection
+    (PrivilegedIntentsRequired). DM content is delivered without it, so confer
+    must not request it. Regression guard for a bug caught in smoke testing."""
+    transport = DiscordTransport(token="t", user_id=42)
+    assert transport._client.intents.message_content is False
+    assert transport._client.intents.dm_messages is True
+
+
 def _mocked_response(status: int = 500) -> MagicMock:
     response = MagicMock()
     response.status = status
