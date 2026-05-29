@@ -10,7 +10,7 @@ from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Awaitable, Callable, Literal
 
 from confer.daemon.routing import (
     CONCIERGE_STUB,
@@ -63,6 +63,14 @@ _TAG_LEN = 4
 def _make_thread_tag() -> str:
     """Random 4-char base32 thread tag (Thread Tag Model, tgq4n7px)."""
     return "".join(secrets.choice(_TAG_ALPHABET) for _ in range(_TAG_LEN))
+
+
+def _should_skip_reping(now: float, deadline_at: float) -> bool:
+    """A re-ping that would land within _SKIP_REPING_NEAR_DEADLINE seconds of
+    the give-up deadline is skipped (avoids 'still waiting' immediately before
+    a timeout DM). Pure helper so the 60s-window arithmetic is unit-testable
+    across the boundary without wall-clock sleeps (review finding TST-F1/F3)."""
+    return deadline_at - now < _SKIP_REPING_NEAR_DEADLINE
 
 
 def _closing_dm_text(reason: str, tag: str) -> str:
@@ -169,9 +177,16 @@ class Daemon:
         self,
         transport: DiscordTransport,
         re_ping_every_seconds: int = 900,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._transport = transport
         self._re_ping_every_seconds = re_ping_every_seconds
+        # Injectable for deterministic timing tests (Two-Layer Test Strategy
+        # addendum, 7vpm2qkx); default to real monotonic time / asyncio.sleep.
+        self._clock = clock
+        self._sleep = sleep
         self._clients: dict[str, _Client] = {}
         self._pending_asks: dict[str, _PendingAsk] = {}
         self._notify_threads: dict[str, _NotifyThread] = {}
@@ -409,7 +424,7 @@ class Daemon:
             question=msg.question,
             on_timeout=msg.on_timeout,
             give_up_after_seconds=msg.give_up_after_seconds,
-            started_at=time.monotonic(),
+            started_at=self._clock(),
             writer=writer,
             tag=self._assign_thread_tag(),
         )
@@ -597,11 +612,10 @@ class Daemon:
         deadline_at = pending.started_at + pending.give_up_after_seconds
         while True:
             try:
-                await asyncio.sleep(self._re_ping_every_seconds)
+                await self._sleep(self._re_ping_every_seconds)
             except asyncio.CancelledError:
                 return
-            remaining = deadline_at - time.monotonic()
-            if remaining < _SKIP_REPING_NEAR_DEADLINE:
+            if _should_skip_reping(self._clock(), deadline_at):
                 return
             body = (
                 f"Re: {pending.tag} — still waiting on your answer: "
@@ -616,7 +630,7 @@ class Daemon:
 
     async def _timeout_loop(self, pending: _PendingAsk) -> None:
         try:
-            await asyncio.sleep(pending.give_up_after_seconds)
+            await self._sleep(pending.give_up_after_seconds)
         except asyncio.CancelledError:
             return
         # Time's up. If the ask was already resolved (race), nothing to do.

@@ -229,3 +229,35 @@ def test_main_answer_dispatches(monkeypatch):
     rc = main(["answer", "yes please"])
     assert rc == 0
     assert called == [("answer", "yes please")]
+
+
+@pytest.mark.parametrize(
+    "outcome,expected_exit",
+    [
+        ("delivered", 0),
+        ("queued_notify_reply", 0),
+        ("broadcast", 0),
+        ("bounced", 1),
+        ("ambiguous", 1),
+        ("concierge", 1),
+    ],
+)
+async def test_cmd_answer_exit_code_per_daemon_outcome(tmp_path, monkeypatch, outcome, expected_exit):
+    """TST-F4: every outcome the daemon can emit maps to a defined exit code,
+    so a script branching on `confer answer` status behaves correctly."""
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(cli_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        msg = decode(await reader.readline())
+        assert isinstance(msg, Inject)
+        writer.write(encode(InjectResult(
+            request_id=msg.request_id, outcome=outcome, detail="x",
+        )))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        rc = await cli_mod._cmd_answer("anything")
+    assert rc == expected_exit

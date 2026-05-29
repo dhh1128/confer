@@ -760,6 +760,61 @@ def _mocked_transport() -> MagicMock:
     return t
 
 
+class _FakeClock:
+    """Deterministic clock+sleep for timing tests (TST-F1): sleep advances the
+    clock by the requested duration and yields once — no wall-clock dependence,
+    so the production timing constants are exercised at real values."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, d: float) -> None:
+        self.now += d
+        await asyncio.sleep(0)
+
+
+def _clock_daemon(re_ping_every_seconds: int = 900) -> tuple[Daemon, _FakeClock]:
+    fc = _FakeClock()
+    daemon = Daemon(
+        transport=_mocked_transport(),
+        re_ping_every_seconds=re_ping_every_seconds,
+        clock=fc.time,
+        sleep=fc.sleep,
+    )
+    return daemon, fc
+
+
+def _insert_pending(
+    daemon: Daemon,
+    writer: MagicMock,
+    *,
+    request_id: str = "ask-r1",
+    question: str = "rebase?",
+    on_timeout: str = "use_best_judgment",
+    give_up_after_seconds: float = 30,
+    label: str = "confer/main",
+    tag: str = "taga",
+) -> _PendingAsk:
+    """Insert a pending ask WITHOUT spawning the background timeout/re-ping
+    tasks, so a test can drive _timeout_loop / _re_ping_loop directly against
+    a fake clock."""
+    pending = _PendingAsk(
+        request_id=request_id,
+        label=label,
+        question=question,
+        on_timeout=on_timeout,
+        give_up_after_seconds=give_up_after_seconds,
+        started_at=daemon._clock(),
+        writer=writer,
+        tag=tag,
+    )
+    daemon._pending_asks[request_id] = pending
+    return pending
+
+
 async def _hello_and_get_writer(daemon: Daemon, label: str = "confer/main") -> MagicMock:
     writer = _writer_mock()
     daemon._clients[label] = _Client(label=label, writer=writer)
@@ -851,31 +906,49 @@ async def test_ask_cancel_idempotent_when_absent():
     daemon._transport.notify.assert_not_awaited()
 
 
-async def test_timeout_use_best_judgment_sends_directive_and_re_closing_dm():
-    daemon = _make_daemon()
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
-    tag = pending.tag
-    await asyncio.sleep(0.05)
+async def test_timeout_use_best_judgment_sends_directive_and_closing_dm():
+    # Deterministic: drive the timeout loop directly against a fake clock with a
+    # realistic give_up_after_seconds (not 0), no wall-clock margin.
+    daemon, fc = _clock_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(daemon, writer, give_up_after_seconds=30, tag="bj01")
+    await daemon._timeout_loop(pending)
     assert pending.request_id not in daemon._pending_asks
+    assert fc.now == 30  # the loop waited exactly the give-up window
     sent = _written_messages(writer)
     assert any(
         isinstance(m, AskTimeout) and m.outcome == "use_best_judgment" for m in sent
     )
     bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
-    assert f"Re: {tag} — time's up; agent will use its best judgment." in bodies
+    assert "Re: bj01 — time's up; agent will use its best judgment." in bodies
+
+
+async def test_timeout_loop_cancels_live_re_ping_task():
+    # Covers the timeout path that cancels a still-running re-ping task.
+    daemon, fc = _clock_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(daemon, writer, give_up_after_seconds=30, tag="tc01")
+
+    async def _sleeper():
+        await asyncio.sleep(3600)
+
+    pending.re_ping_task = asyncio.create_task(_sleeper())
+    await daemon._timeout_loop(pending)
+    with pytest.raises(asyncio.CancelledError):
+        await pending.re_ping_task
 
 
 async def test_timeout_abort_sends_abort_directive():
-    daemon = _make_daemon()
-    writer, pending = await _register_ask(
-        daemon, on_timeout="abort", give_up_after_seconds=0
+    daemon, fc = _clock_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(
+        daemon, writer, on_timeout="abort", give_up_after_seconds=30, tag="ab01"
     )
-    tag = pending.tag
-    await asyncio.sleep(0.05)
+    await daemon._timeout_loop(pending)
     sent = _written_messages(writer)
     assert any(isinstance(m, AskTimeout) and m.outcome == "abort" for m in sent)
     bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
-    assert f"Re: {tag} — time's up; agent will stop and surface task state." in bodies
+    assert "Re: ab01 — time's up; agent will stop and surface task state." in bodies
 
 
 async def test_dispatch_user_message_single_ask_unprefixed_delivers():
@@ -1075,33 +1148,41 @@ async def test_disconnect_drops_asks_with_lost_contact_dm():
 # ─── re-ping ─────────────────────────────────────────────────────────────────
 
 
-async def test_re_ping_uses_re_tag_anchor():
-    daemon = Daemon(transport=_mocked_transport(), re_ping_every_seconds=0.05)
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=120)
+def test_should_skip_reping_across_60s_boundary():
+    # Pure-function test of the skip arithmetic at the real 60s constant (TST-F3):
+    # this is what the old give_up=0.1 test could never exercise.
+    from confer.daemon.core import _SKIP_REPING_NEAR_DEADLINE, _should_skip_reping
+    deadline = 1000.0
+    assert _should_skip_reping(deadline - (_SKIP_REPING_NEAR_DEADLINE + 1), deadline) is False
+    assert _should_skip_reping(deadline - _SKIP_REPING_NEAR_DEADLINE, deadline) is False  # exactly 60: not < 60
+    assert _should_skip_reping(deadline - (_SKIP_REPING_NEAR_DEADLINE - 1), deadline) is True
+
+
+async def test_re_ping_fires_each_cadence_until_near_deadline_then_skips():
+    # give_up=120, cadence=15: re-pings land at t=15,30,45,60 (remaining 105..60,
+    # never < 60), then the t=75 tick has remaining 45 < 60 → skip+return.
+    daemon, fc = _clock_daemon(re_ping_every_seconds=15)
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(daemon, writer, give_up_after_seconds=120, tag="rp01")
     daemon._transport.notify.reset_mock()
-    await asyncio.sleep(0.15)
+    await daemon._re_ping_loop(pending)
     bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
-    assert any(b.startswith(f"Re: {pending.tag} — still waiting") for b in bodies)
-    await daemon._handle_ask_cancel(pending.request_id)
+    assert len(bodies) == 4
+    assert all(b.startswith("Re: rp01 — still waiting") for b in bodies)
+    assert fc.now == 75
 
 
 async def test_re_ping_send_failure_non_fatal(caplog):
     import logging
-    daemon = Daemon(transport=_mocked_transport(), re_ping_every_seconds=0.05)
+    daemon, fc = _clock_daemon(re_ping_every_seconds=15)
     daemon._transport.notify = AsyncMock(side_effect=RuntimeError("boom"))
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=120)
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(daemon, writer, give_up_after_seconds=120, tag="rp02")
     with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
-        await asyncio.sleep(0.15)
+        await daemon._re_ping_loop(pending)
+    # The loop logged each failure and kept going; the ask is still pending.
     assert pending.request_id in daemon._pending_asks
     assert any("re-ping send failed" in r.getMessage() for r in caplog.records)
-    await daemon._handle_ask_cancel(pending.request_id)
-
-
-async def test_re_ping_skips_near_deadline():
-    daemon = Daemon(transport=_mocked_transport(), re_ping_every_seconds=0.05)
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=0.1)
-    await asyncio.sleep(0.2)
-    assert pending.request_id not in daemon._pending_asks
 
 
 async def test_re_ping_loop_cancelled_returns_cleanly():
@@ -1123,12 +1204,11 @@ async def test_timeout_loop_cancelled_returns_cleanly():
 
 
 async def test_timeout_loop_no_op_when_already_resolved():
-    daemon = _make_daemon()
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
-    daemon._pending_asks.pop(pending.request_id)
-    if pending.re_ping_task is not None:
-        pending.re_ping_task.cancel()
-    await asyncio.sleep(0.05)
+    daemon, fc = _clock_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(daemon, writer, give_up_after_seconds=30, tag="no01")
+    daemon._pending_asks.pop(pending.request_id)  # resolved before the timeout fires
+    await daemon._timeout_loop(pending)
     assert not any(isinstance(m, AskTimeout) for m in _written_messages(writer))
 
 
@@ -1428,12 +1508,61 @@ async def test_ask_reply_carries_pending_count():
 
 
 async def test_ask_timeout_carries_pending_count():
-    daemon = _make_daemon()
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
+    daemon, fc = _clock_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(daemon, writer, give_up_after_seconds=30, tag="pc01")
     daemon._enqueue_message("confer/main", "stop", source="broadcast", tag=None)
-    await asyncio.sleep(0.05)
+    await daemon._timeout_loop(pending)
     to = next(m for m in _written_messages(writer) if isinstance(m, AskTimeout))
     assert to.pending_count == 1
+
+
+async def test_every_route_and_act_outcome_is_declared_in_inject_literal():
+    # TST-F2 guard: enumerate every outcome _route_and_act emits and assert each
+    # is a declared InjectResult.outcome Literal member (and the dropped
+    # "queued_labeled" is gone). Pins the protocol/daemon/CLI contract.
+    from typing import get_args, get_type_hints
+    from confer.protocol import InjectResult
+
+    allowed = set(get_args(get_type_hints(InjectResult)["outcome"]))
+    outcomes = set()
+
+    d = _make_daemon()
+    outcomes.add((await d._route_and_act("."))[0])  # concierge
+
+    d = _make_daemon()
+    outcomes.add((await d._route_and_act("hello"))[0])  # bounced (no agents)
+
+    d = _make_daemon()
+    d._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
+    outcomes.add((await d._route_and_act("everyone stop"))[0])  # broadcast
+
+    d = _make_daemon()
+    await _register_ask(d, request_id="r1", label="confer/main")
+    w2 = await _hello_and_get_writer(d, "myapp/feat")
+    await d._handle_ask_begin(
+        AskBegin(request_id="r2", question="q", give_up_after_seconds=60,
+                 on_timeout="use_best_judgment"), w2, "myapp/feat")
+    outcomes.add((await d._route_and_act("hello"))[0])  # ambiguous
+    await d._handle_ask_cancel("r1")
+    await d._handle_ask_cancel("r2")
+
+    d = _make_daemon()
+    _, p = await _register_ask(d, request_id="r3", label="confer/main")
+    outcomes.add((await d._route_and_act(f"re {p.tag} yes"))[0])  # delivered
+
+    d = _make_daemon()
+    w = await _hello_and_get_writer(d, "confer/main")
+    await d._handle_notify(Notify(request_id="n1", message="done"), w, "confer/main")
+    tag = next(iter(d._notify_threads))
+    outcomes.add((await d._route_and_act(f"re {tag} roll back"))[0])  # queued_notify_reply
+
+    assert outcomes == {
+        "concierge", "bounced", "broadcast", "ambiguous", "delivered",
+        "queued_notify_reply",
+    }
+    assert outcomes <= allowed
+    assert "queued_labeled" not in allowed
 
 
 def test_pending_count_and_hint_helpers():

@@ -101,8 +101,15 @@ class Inject:
 @dataclass(frozen=True)
 class InjectResult:
     request_id: str
+    # The exact set the daemon's _route_and_act emits (see ci7n4pvm). A test
+    # enumerates daemon outcomes against this Literal so it can't drift.
     outcome: Literal[
-        "delivered", "queued_labeled", "broadcast", "bounced", "ambiguous"
+        "delivered",
+        "queued_notify_reply",
+        "broadcast",
+        "bounced",
+        "ambiguous",
+        "concierge",
     ]
     detail: str
     kind: Literal["INJECT_RESULT"] = "INJECT_RESULT"

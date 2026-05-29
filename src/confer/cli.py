@@ -26,7 +26,10 @@ from confer.protocol import (
 )
 
 
-_NON_ZERO_EXIT_OUTCOMES = {"bounced", "ambiguous"}
+# Outcomes where nothing reached an agent → non-zero exit so a script
+# branching on `confer answer` status behaves correctly (ci7n4pvm).
+# delivered / queued_notify_reply / broadcast are successes (exit 0).
+_NON_ZERO_EXIT_OUTCOMES = {"bounced", "ambiguous", "concierge"}
 
 
 async def _send_one(msg: Message) -> Message:
@@ -100,8 +103,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "answer",
         help=(
             "Send text to the daemon, routed by the same rules as a Discord "
-            "DM. Use 'N ...' for the Nth pending ask, 'label-prefix: ...' "
-            "for a specific agent, or just text when only one ask is pending."
+            "DM. Address a specific thread with 're <tag> ...' (a unique tag "
+            "prefix is fine, e.g. 're k3 ...'), or just send text when only "
+            "one ask is pending. With no pending ask, the text is broadcast "
+            "to all connected agents. See 'confer list' for open asks and "
+            "their tags."
         ),
     )
     answer.add_argument("text", help="Reply or message body.")
