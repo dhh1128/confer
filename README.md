@@ -4,19 +4,40 @@
 
 An MCP-mediated channel that lets AI coding agents notify the user on their phone (via Discord DM) when a long-running task finishes or input is needed, and receive a dictated reply.
 
-## Quick start
+## Install
+
+If you just want to *run* confer (a second dev machine, or a friend you're sharing it with), you don't need to clone the repo or have write access to it — install it straight from the git URL.
 
 Prerequisites:
 
-- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) — install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- A Discord bot token and your Discord user id, with the bot sharing at least one guild with you (see [Configuration](#configuration) for how to get these).
 
-From a fresh clone:
+Install confer as a uv-managed tool:
 
 ```bash
-uv sync          # creates .venv, installs confer (editable) + dev dependencies
-uv run pytest    # runs the test suite with branch coverage (target: 100%)
+uv tool install git+https://github.com/dhh1128/confer
 ```
+
+This drops all three console scripts — `confer`, `confer-server`, and `confer-daemon` — onto your PATH in one managed environment. No clone, no editable checkout, no maintainer access required. (A PyPI publish is planned that will shorten this to `uv tool install confer`.)
+
+Then configure and register in one step:
+
+```bash
+confer setup
+```
+
+`confer setup` scaffolds `~/.config/confer/config.toml` (mode `0600`), prompts for your Discord bot token and user id (or pass `--token` / `--user-id`), and registers the MCP server with Claude Code via `claude mcp add` (skip with `--no-register`). Re-run with `--force` to replace an existing config.
+
+Prefer to do it by hand? See [Configuration](#configuration) for the config file, then register with your MCP client. For Claude Code, MCP servers register in `~/.claude.json` via `claude mcp add`:
+
+```bash
+claude mcp add confer -- confer-server
+```
+
+Other stdio MCP clients (Cursor, etc.) just point at the `confer-server` command, which is now on your PATH.
+
+The MCP server auto-spawns the daemon (`confer-daemon`) the first time it's needed by resolving it on PATH — you never start the daemon manually.
 
 ## Configuration
 
@@ -43,13 +64,19 @@ confer has two processes:
 
 ### Running the MCP server
 
-After configuration, point your MCP client (Claude Code, Cursor, etc.) at:
+After configuration, point your MCP client (Claude Code, Cursor, etc.) at the `confer-server` command. If you installed via `uv tool install` (see [Install](#install)), that's simply:
+
+```bash
+confer-server
+```
+
+From a source checkout, run it through uv instead:
 
 ```bash
 uv run confer-server
 ```
 
-The MCP server will auto-spawn the daemon if it isn't already running. You don't need to start the daemon manually.
+Either way, the MCP server will auto-spawn the daemon if it isn't already running. You don't need to start the daemon manually.
 
 ### Managing the daemon
 
@@ -72,6 +99,24 @@ All three MCP tools are implemented, plus a user-side `confer` CLI for answering
 | `check_messages` | `check_messages() -> str` | Drains the agent's queue of unsolicited input (broadcasts, replies to its notify threads, late replies), tagged by source. Consume-on-read. Returns a directive when empty. |
 
 The `confer` CLI (`confer list`, `confer answer "re <tag> …"`) lets the user answer pending asks from the workstation without Discord. See `this.i` for the full design rationale (threading, tags, routing).
+
+## Development setup
+
+If you're contributing to confer (rather than just running it), work from a clone instead of `uv tool install`.
+
+Prerequisites:
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) — install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+From a fresh clone:
+
+```bash
+uv sync          # creates .venv, installs confer (editable) + dev dependencies
+uv run pytest    # runs the test suite with branch coverage (target: 100%)
+```
+
+In this layout the console scripts are run through uv (`uv run confer-server`, `uv run confer`, etc.) rather than directly on PATH.
 
 ## Where things live
 

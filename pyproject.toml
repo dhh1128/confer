@@ -4,10 +4,29 @@ version = "0.1.0"
 description = "MCP-mediated agent-to-human notification system via Discord DM"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "Daniel Hardman", email = "daniel.hardman@gmail.com" }]
+keywords = ["mcp", "discord", "notifications", "agents", "claude", "daemon"]
+# NOTE: no license is declared yet — pick one (e.g. add `license = "MIT"` and a
+# LICENSE file) before the first PyPI publish (PyPI Trusted Publishing, pp4nqvx7).
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "discord-py>=2.7.1",
     "mcp>=1.27.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dhh1128/confer"
+Repository = "https://github.com/dhh1128/confer"
+Issues = "https://github.com/dhh1128/confer/issues"
 
 [project.scripts]
 confer = "confer.cli:main"

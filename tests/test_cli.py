@@ -1,6 +1,8 @@
 import asyncio
+import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -261,3 +263,171 @@ async def test_cmd_answer_exit_code_per_daemon_outcome(tmp_path, monkeypatch, ou
     async with _fake_daemon(handler, sock):
         rc = await cli_mod._cmd_answer("anything")
     assert rc == expected_exit
+
+
+# ─── confer setup (st7nqkp4) ────────────────────────────────────────────────
+
+
+def _scripted_input(*responses):
+    """Build a fake input() that returns the given responses in order."""
+    it = iter(responses)
+    return lambda prompt="": next(it)
+
+
+def test_parser_setup_parses_defaults():
+    args = _build_parser().parse_args(["setup"])
+    assert args.cmd == "setup"
+    assert args.token is None
+    assert args.user_id is None
+    assert args.force is False
+    assert args.register is True  # --no-register defaults to register=True
+
+
+def test_parser_setup_parses_flags():
+    args = _build_parser().parse_args(
+        ["setup", "--token", "T", "--user-id", "42", "--force", "--no-register"]
+    )
+    assert args.token == "T"
+    assert args.user_id == "42"
+    assert args.force is True
+    assert args.register is False
+
+
+def test_toml_escape_handles_quote_and_backslash():
+    assert cli_mod._toml_escape(r'a"b\c') == r'a\"b\\c'
+
+
+def _point_config_at(monkeypatch, tmp_path):
+    path = tmp_path / "confer" / "config.toml"
+    monkeypatch.setattr(cli_mod, "default_config_path", lambda: path)
+    return path
+
+
+def test_setup_refuses_to_overwrite_without_force(tmp_path, monkeypatch, capsys):
+    path = _point_config_at(monkeypatch, tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("discord_bot_token = \"old\"\nconfer_user_id = 1\n")
+
+    rc = cli_mod._cmd_setup(token="new", user_id="2", force=False, register=False)
+    assert rc == 1
+    assert "refusing to overwrite" in capsys.readouterr().err
+    # Untouched.
+    assert "old" in path.read_text()
+
+
+def test_setup_writes_config_0600_and_skips_register(tmp_path, monkeypatch, capsys):
+    path = _point_config_at(monkeypatch, tmp_path)
+
+    rc = cli_mod._cmd_setup(
+        token="bot.tok", user_id="123456789", force=False, register=False
+    )
+    assert rc == 0
+    body = path.read_text()
+    assert 'discord_bot_token = "bot.tok"' in body
+    assert "confer_user_id = 123456789" in body
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    out = capsys.readouterr().out
+    assert "Skipped Claude registration" in out
+    assert "Setup complete" in out
+
+
+def test_setup_prompts_when_flags_omitted(tmp_path, monkeypatch, capsys):
+    path = _point_config_at(monkeypatch, tmp_path)
+
+    rc = cli_mod._cmd_setup(
+        token=None,
+        user_id=None,
+        force=False,
+        register=False,
+        input_fn=_scripted_input("prompted.tok", "987654321"),
+    )
+    assert rc == 0
+    body = path.read_text()
+    assert 'discord_bot_token = "prompted.tok"' in body
+    assert "confer_user_id = 987654321" in body
+
+
+def test_setup_force_overwrites_existing(tmp_path, monkeypatch):
+    path = _point_config_at(monkeypatch, tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("discord_bot_token = \"old\"\nconfer_user_id = 1\n")
+
+    rc = cli_mod._cmd_setup(token="fresh", user_id="5", force=True, register=False)
+    assert rc == 0
+    assert "fresh" in path.read_text()
+
+
+def test_setup_empty_token_errors(tmp_path, monkeypatch, capsys):
+    _point_config_at(monkeypatch, tmp_path)
+    rc = cli_mod._cmd_setup(token="", user_id="1", force=False, register=False)
+    assert rc == 1
+    assert "non-empty Discord bot token" in capsys.readouterr().err
+
+
+def test_setup_nondigit_user_id_errors(tmp_path, monkeypatch, capsys):
+    _point_config_at(monkeypatch, tmp_path)
+    rc = cli_mod._cmd_setup(token="t", user_id="abc", force=False, register=False)
+    assert rc == 1
+    assert "positive integer snowflake" in capsys.readouterr().err
+
+
+def test_setup_zero_user_id_errors(tmp_path, monkeypatch, capsys):
+    _point_config_at(monkeypatch, tmp_path)
+    rc = cli_mod._cmd_setup(token="t", user_id="0", force=False, register=False)
+    assert rc == 1
+    assert "positive integer snowflake" in capsys.readouterr().err
+
+
+def test_setup_register_true_when_claude_missing(tmp_path, monkeypatch, capsys):
+    _point_config_at(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda _: None)
+
+    rc = cli_mod._cmd_setup(token="t", user_id="1", force=False, register=True)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "not found on PATH" in out
+    assert "claude mcp add confer -- confer-server" in out
+
+
+def test_register_with_claude_success(monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    cli_mod._register_with_claude()
+    assert calls == [["claude", "mcp", "add", "confer", "--", "confer-server"]]
+    assert "Registered confer with Claude Code" in capsys.readouterr().out
+
+
+def test_register_with_claude_nonzero_exit_warns(monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        cli_mod.subprocess, "run", lambda cmd: SimpleNamespace(returncode=1)
+    )
+    cli_mod._register_with_claude()
+    assert "exited 1" in capsys.readouterr().err
+
+
+def test_main_setup_dispatches(monkeypatch):
+    captured = {}
+
+    def fake_setup(*, token, user_id, force, register):
+        captured.update(
+            token=token, user_id=user_id, force=force, register=register
+        )
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_cmd_setup", fake_setup)
+    rc = main(["setup", "--token", "T", "--user-id", "9", "--force"])
+    assert rc == 0
+    assert captured == {
+        "token": "T",
+        "user_id": "9",
+        "force": True,
+        "register": True,
+    }

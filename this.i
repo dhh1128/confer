@@ -1652,6 +1652,66 @@ Confer = goal:
         approval pattern across many similar asks), OR a second user-side
         responder (secondary agent, scripted handler) becomes desired.
 
+    # ─── DISTRIBUTION ────────────────────────────────────────────────────────
+
+    Distribute Via uv tool install = decision:
+      id: db7nqkx4
+      why: >
+        confer is distributed as a uv tool: `uv tool install confer` (or a
+        git URL until PyPI publish) places all three console_scripts —
+        confer, confer-server, confer-daemon — on PATH in one managed
+        environment. This is what makes the existing architecture
+        distribution-ready with zero new runtime code: the daemon auto-spawn
+        (7xj4mvqn) PATH-resolves confer-daemon via shutil.which, and all
+        runtime state is XDG-based (config at ~/.config/confer/config.toml,
+        hq7x3npm), so nothing assumes a git checkout or `uv run`. Any user
+        gets a working install with no clone and no maintainer access. uv is
+        already the project's chosen toolchain (Stack Selection, w3f5qkc2),
+        so this adds no new dependency. Considered and rejected: (a) a
+        hand-rolled Python zipapp one-liner installer — reinvents what
+        `uv tool install` already does, fights confer's genuinely native-ish
+        dependency tree (discord.py, mcp), and yields only ONE entry point
+        when the daemon model needs THREE durably on PATH; (b) uvx ephemeral
+        (`uvx confer-server`), the trendy MCP-server pattern — it BREAKS
+        confer specifically, because the ephemeral env is torn down and never
+        installs confer-daemon durably on PATH, yet the daemon is a
+        persistent singleton meant to OUTLIVE every MCP server (Central
+        Daemon Architecture, dq7n3xpk), so auto-spawn cannot reliably resolve
+        it; (c) pipx — works, but uv is already chosen. Tier-0 path is
+        available immediately with no new infra:
+        `uv tool install git+https://github.com/dhh1128/confer` unblocks a
+        second dev machine and non-maintainer friends today, before any PyPI
+        publish.
+
+    PyPI Trusted Publishing = decision:
+      id: pp4nqvx7
+      why: >
+        Tier 1: publish confer to PyPI via a GitHub Actions OIDC trusted
+        publisher, so the install shortens to `uv tool install confer` (no
+        git URL) and uvx-style discovery works for clients that want it,
+        layered on Distribute Via uv tool install (db7nqkx4). Publishing is
+        OUTWARD-FACING and IRREVERSIBLE — a released version or name cannot
+        be cleanly retracted — so the actual publish, the PyPI-side
+        trusted-publisher configuration, and confirming the `confer` name is
+        available on PyPI are MANUAL steps left to daniel. Nothing in the
+        repo auto-publishes without an explicit tagged release he creates;
+        the workflow fires only on a tag he pushes deliberately.
+
+    confer setup Subcommand = decision:
+      id: st7nqkp4
+      why: >
+        Tier 2: a `confer setup` CLI subcommand performs the post-install
+        ceremony in one step — scaffold and chmod 600
+        ~/.config/confer/config.toml (hq7x3npm), accept and validate the
+        Discord bot token and confer_user_id, and optionally register the MCP
+        server with Claude Code (`claude mcp add confer -- confer-server`).
+        This is the genuinely valuable custom piece, and it is built as a
+        confer subcommand ON TOP OF uv (db7nqkx4) — NOT as a separate zipapp
+        installer (rejected for the same reasons recorded there). It replaces
+        the current manual mkdir/cp/chmod/claude-mcp-add steps with a single
+        guided command, reducing first-run friction without coupling confer
+        to a bespoke installer.
+
     # ─── REVIEW-PANEL FINDINGS (post-G3, 2026-05-29) ─────────────────────────
     # The four-persona review-panel over confer@main surfaced these; the
     # recommend-fix items were fixed in code. The deferred / accept-risk items
