@@ -100,6 +100,33 @@ All three MCP tools are implemented, plus a user-side `confer` CLI for answering
 
 The `confer` CLI (`confer list`, `confer answer "re <tag> …"`) lets the user answer pending asks from the workstation without Discord. See `this.i` for the full design rationale (threading, tags, routing).
 
+## Away mode
+
+When you leave your desk, you want every running (and later-opened) Claude Code session to reach you over Discord instead of silently waiting at a terminal — without retyping an instruction in each window. One command, run anywhere, flips that policy globally:
+
+```bash
+confer away              # leaving — agents now reach you via confer
+confer away --note "back after lunch"
+confer back              # back at the keyboard (also happens automatically — see below)
+confer presence          # show current state
+```
+
+This is enforced by two Claude Code hooks, installed once into `~/.claude`:
+
+```bash
+confer install-hooks           # writes the hooks + /away /back slash commands
+confer install-hooks --print   # dry run: show what it would change
+confer setup --integrations    # or fold it into first-time setup
+```
+
+How it works:
+
+- **Presence** is a small file in `$XDG_RUNTIME_DIR` (`confer away` writes it, `confer back` removes it). It's shared across all your sessions and cleared on reboot. No daemon needed.
+- A **`Stop` hook** runs when a session would end its turn. If you're away and the agent hasn't already reached out via confer this turn, the hook tells it to use `ask`/`notify` instead of idling. It's loop-safe and **fails open** — anything uncertain (present, unreadable transcript, parse error) lets the session stop normally, so it never wedges an unrelated, non-confer session.
+- A **`UserPromptSubmit` hook** clears away mode the moment you type a prompt in *any* session — if you're at a keyboard, you're back, everywhere. Discord replies come back through the confer tools (not the prompt box), so answering from your phone doesn't trip it.
+
+The installer is idempotent and merges into your existing `settings.json` rather than overwriting it. See `this.i` (the AWAY MODE section) for the full rationale, including why presence is a workstation file rather than daemon state.
+
 ## Development setup
 
 If you're contributing to confer (rather than just running it), work from a clone instead of `uv tool install`.
@@ -117,6 +144,21 @@ uv run pytest    # runs the test suite with branch coverage (target: 100%)
 ```
 
 In this layout the console scripts are run through uv (`uv run confer-server`, `uv run confer`, etc.) rather than directly on PATH.
+
+## Releasing
+
+Releases are cut with `scripts/release.py`, which bumps the version in `pyproject.toml`, runs the test suite, commits (signed off), and pushes a `v<x.y.z>` tag. That tag triggers [`publish.yml`](.github/workflows/publish.yml), which builds and publishes confer to PyPI via trusted publishing.
+
+```bash
+python scripts/release.py                       # patch bump, default message
+python scripts/release.py --minor -m "new tool" # minor bump
+python scripts/release.py --major -m "rewrite"  # major bump
+python scripts/release.py --set 0.2.0 -m "..."  # set an explicit version
+```
+
+Before running, the script refuses to proceed unless you're on `main`, the working tree is clean, and local `main` is in sync with `origin/main`; it then runs `uv run pytest` (which enforces 100% branch coverage) and only tags if that passes. Running the command is the release authorization — there is no extra confirmation prompt.
+
+**First release prerequisites (one-time, outward-facing — see [`publish.yml`](.github/workflows/publish.yml)):** confirm the `confer` name is available on PyPI, configure the PyPI trusted publisher for this repo + the `pypi` environment, and decide on a license (`pyproject.toml` has no `license` declared yet). The publish job will fail until these are done.
 
 ## Where things live
 

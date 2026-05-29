@@ -42,3 +42,10 @@ def pid_file() -> Path:
 
 def log_file() -> Path:
     return _xdg_state_home() / "confer" / "daemon.log"
+
+
+def presence_file() -> Path:
+    """Workstation away-presence marker (Presence As A Workstation File,
+    pf4nqkx7). Lives beside the socket in the runtime dir so it is per-user,
+    shared across sessions, and cleared on reboot (reboot ⇒ present)."""
+    return _xdg_runtime_dir() / "confer.presence"

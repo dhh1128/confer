@@ -1,4 +1,6 @@
 import asyncio
+import io
+import json
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -416,9 +418,10 @@ def test_register_with_claude_nonzero_exit_warns(monkeypatch, capsys):
 def test_main_setup_dispatches(monkeypatch):
     captured = {}
 
-    def fake_setup(*, token, user_id, force, register):
+    def fake_setup(*, token, user_id, force, register, with_integrations):
         captured.update(
-            token=token, user_id=user_id, force=force, register=register
+            token=token, user_id=user_id, force=force, register=register,
+            with_integrations=with_integrations,
         )
         return 0
 
@@ -430,4 +433,135 @@ def test_main_setup_dispatches(monkeypatch):
         "user_id": "9",
         "force": True,
         "register": True,
+        "with_integrations": False,
     }
+
+
+# ─── away mode: presence / hooks / install (aw7nqkp4) ───────────────────────
+
+
+@pytest.fixture
+def cli_presence(tmp_path, monkeypatch):
+    from confer import presence as presence_mod
+    p = tmp_path / "confer.presence"
+    monkeypatch.setattr(presence_mod, "presence_file", lambda: p)
+    return p
+
+
+def test_parser_away_with_note():
+    args = _build_parser().parse_args(["away", "--note", "lunch"])
+    assert args.cmd == "away" and args.note == "lunch"
+
+
+def test_parser_hook_rejects_unknown_event():
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["hook", "bogus"])
+
+
+def test_parser_install_hooks_print_flag():
+    args = _build_parser().parse_args(["install-hooks", "--print"])
+    assert args.cmd == "install-hooks" and args.dry_run is True
+
+
+def test_main_away_sets_presence(cli_presence, capsys):
+    assert main(["away"]) == 0
+    assert cli_presence.exists()
+    assert "away mode ON" in capsys.readouterr().out
+
+
+def test_main_away_with_note_echoes_note(cli_presence, capsys):
+    assert main(["away", "--note", "bbl"]) == 0
+    assert '"bbl"' in capsys.readouterr().out
+
+
+def test_main_back_clears_presence(cli_presence, capsys):
+    from confer import presence as presence_mod
+    presence_mod.set_away(now=1.0)
+    assert main(["back"]) == 0
+    assert not cli_presence.exists()
+    assert "away mode OFF" in capsys.readouterr().out
+
+
+def test_main_presence_present(cli_presence, capsys):
+    assert main(["presence"]) == 0
+    assert capsys.readouterr().out.strip() == "present"
+
+
+def test_main_presence_away_with_note(cli_presence, capsys):
+    from confer import presence as presence_mod
+    presence_mod.set_away("lunch", now=1.0)
+    assert main(["presence"]) == 0
+    assert capsys.readouterr().out.strip() == 'away — note: "lunch"'
+
+
+def test_main_presence_away_no_note(cli_presence, capsys):
+    from confer import presence as presence_mod
+    presence_mod.set_away(now=1.0)
+    assert main(["presence"]) == 0
+    assert capsys.readouterr().out.strip() == "away"
+
+
+def test_main_hook_prompt_clears_presence(cli_presence):
+    from confer import presence as presence_mod
+    presence_mod.set_away(now=1.0)
+    assert main(["hook", "prompt"]) == 0
+    assert not cli_presence.exists()
+
+
+def test_main_hook_stop_allows_when_present(cli_presence, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    assert main(["hook", "stop"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_main_hook_stop_blocks_when_away(cli_presence, tmp_path, monkeypatch, capsys):
+    from confer import presence as presence_mod
+    presence_mod.set_away(now=1.0)
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps({"type": "user", "message": {"content": []}}) + "\n")
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    assert main(["hook", "stop"]) == 2
+    assert "away from the keyboard" in capsys.readouterr().err
+
+
+def test_main_install_hooks_applies(monkeypatch, capsys):
+    from confer import integrations
+    monkeypatch.setattr(
+        integrations, "install", lambda **kw: ["add Stop hook -> x"]
+    )
+    assert main(["install-hooks"]) == 0
+    out = capsys.readouterr().out
+    assert "Applied:" in out and "add Stop hook" in out
+
+
+def test_main_install_hooks_dry_run(monkeypatch, capsys):
+    from confer import integrations
+    monkeypatch.setattr(integrations, "install", lambda **kw: ["x"])
+    assert main(["install-hooks", "--print"]) == 0
+    assert "Would apply:" in capsys.readouterr().out
+
+
+def test_main_install_hooks_reports_corrupt_settings(monkeypatch, capsys):
+    from confer import integrations
+
+    def boom(**kw):
+        raise json.JSONDecodeError("bad", "doc", 0)
+
+    monkeypatch.setattr(integrations, "install", boom)
+    assert main(["install-hooks"]) == 1
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_setup_with_integrations_runs_installer(tmp_path, monkeypatch, capsys):
+    _point_config_at(monkeypatch, tmp_path)
+    from confer import integrations
+    monkeypatch.setattr(integrations, "install", lambda **kw: ["installed X"])
+    rc = cli_mod._cmd_setup(
+        token="t", user_id="1", force=False, register=False,
+        with_integrations=True,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Installing away-mode integrations" in out
+    assert "installed X" in out

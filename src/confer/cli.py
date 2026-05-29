@@ -14,12 +14,14 @@ ceremony for confer setup Subcommand (st7nqkp4).
 
 import argparse
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import sys
 import uuid
 
+from confer import hooks, integrations, presence
 from confer.config import default_config_path
 from confer.paths import socket_path
 from confer.protocol import (
@@ -141,6 +143,7 @@ def _cmd_setup(
     user_id: str | None,
     force: bool,
     register: bool,
+    with_integrations: bool = False,
     input_fn=input,
 ) -> int:
     """Post-install ceremony: write ~/.config/confer/config.toml (0600) and,
@@ -183,9 +186,64 @@ def _cmd_setup(
             "Skipped Claude registration. To register manually:\n"
             "  claude mcp add confer -- confer-server"
         )
+    if with_integrations:
+        print("Installing away-mode integrations:")
+        for action in integrations.install(dry_run=False):
+            print(f"  - {action}")
     print(
         "Setup complete. Open an MCP client and confer will auto-spawn its daemon."
     )
+    return 0
+
+
+def _cmd_away(note: str | None) -> int:
+    presence.set_away(note)
+    msg = "confer: away mode ON — agents will reach you via Discord."
+    if note:
+        msg += f' (note: "{note}")'
+    print(msg)
+    return 0
+
+
+def _cmd_back() -> int:
+    presence.set_present()
+    print("confer: away mode OFF — back at the keyboard.")
+    return 0
+
+
+def _cmd_presence() -> int:
+    p = presence.read_presence()
+    if not p.away:
+        print("present")
+        return 0
+    suffix = f' — note: "{p.note}"' if p.note else ""
+    print(f"away{suffix}")
+    return 0
+
+
+def _cmd_hook(event: str) -> int:
+    """Internal: dispatch a Claude Code hook event (eh7nqkp4 / ar7nqkp4)."""
+    if event == "prompt":
+        return hooks.run_prompt_hook()
+    code, stderr_text = hooks.run_stop_hook(sys.stdin.read())
+    if stderr_text:
+        print(stderr_text, file=sys.stderr)
+    return code
+
+
+def _cmd_install_hooks(*, dry_run: bool) -> int:
+    try:
+        actions = integrations.install(dry_run=dry_run)
+    except json.JSONDecodeError as exc:
+        print(
+            f"confer: {integrations.claude_dir() / 'settings.json'} is not "
+            f"valid JSON ({exc}); refusing to modify it. Fix it and re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    print("Would apply:" if dry_run else "Applied:")
+    for action in actions:
+        print(f"  - {action}")
     return 0
 
 
@@ -237,6 +295,50 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Skip the 'claude mcp add' registration step.",
     )
+    setup.add_argument(
+        "--integrations",
+        action="store_true",
+        help="Also install the away-mode Stop/UserPromptSubmit hooks and "
+        "/away /back slash commands (same as 'confer install-hooks').",
+    )
+
+    away = sub.add_parser(
+        "away",
+        help=(
+            "Turn on away mode: every confer-aware session reaches you via "
+            "Discord instead of waiting at the terminal. Run from any window."
+        ),
+    )
+    away.add_argument(
+        "--note",
+        default=None,
+        help="Optional note surfaced to agents (e.g. 'back after lunch').",
+    )
+    sub.add_parser(
+        "back",
+        help="Turn off away mode (also happens automatically when you type).",
+    )
+    sub.add_parser("presence", help="Print current presence (away/present).")
+
+    hook = sub.add_parser(
+        "hook",
+        help="Internal: Claude Code hook entry points (used by install-hooks).",
+    )
+    hook.add_argument("event", choices=["stop", "prompt"])
+
+    install = sub.add_parser(
+        "install-hooks",
+        help=(
+            "Install the away-mode hooks and /away /back slash commands into "
+            "~/.claude. Idempotent; merges into existing settings."
+        ),
+    )
+    install.add_argument(
+        "--print",
+        dest="dry_run",
+        action="store_true",
+        help="Show what would change without writing anything.",
+    )
     return parser
 
 
@@ -246,11 +348,22 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_cmd_list())
     if args.cmd == "answer":
         return asyncio.run(_cmd_answer(args.text))
+    if args.cmd == "away":
+        return _cmd_away(args.note)
+    if args.cmd == "back":
+        return _cmd_back()
+    if args.cmd == "presence":
+        return _cmd_presence()
+    if args.cmd == "hook":
+        return _cmd_hook(args.event)
+    if args.cmd == "install-hooks":
+        return _cmd_install_hooks(dry_run=args.dry_run)
     return _cmd_setup(
         token=args.token,
         user_id=args.user_id,
         force=args.force,
         register=args.register,
+        with_integrations=args.integrations,
     )
 
 

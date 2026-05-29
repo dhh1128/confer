@@ -55,6 +55,13 @@ def test_pid_file_uses_xdg_runtime_dir_when_writable(tmp_path, monkeypatch):
     assert paths.pid_file() == runtime / "confer.pid"
 
 
+def test_presence_file_uses_xdg_runtime_dir_when_writable(tmp_path, monkeypatch):
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    assert paths.presence_file() == runtime / "confer.presence"
+
+
 def test_log_file_uses_xdg_state_home(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert paths.log_file() == tmp_path / "state" / "confer" / "daemon.log"

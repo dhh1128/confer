@@ -1652,6 +1652,123 @@ Confer = goal:
         approval pattern across many similar asks), OR a second user-side
         responder (secondary agent, scripted handler) becomes desired.
 
+    # ─── AWAY MODE ───────────────────────────────────────────────────────────
+
+    Presence-Aware Away Mode = goal:
+      id: aw7nqkp4
+      why: >
+        When daniel leaves his desk, every running — and every later-opened —
+        Claude Code session should switch from waiting silently at the terminal
+        to reaching him through the confer tools (ask / notify / check_messages),
+        and switch back when he returns. The cost he is unwilling to pay is
+        re-explaining himself: he will not retype an away instruction in each
+        session, nor copy/paste it across a dozen windows. So the bar is: one
+        command, run from any window, flips the policy globally; returning to
+        the keyboard flips it back automatically. This promotes confer from
+        "tools an agent may choose to use" to "a presence mode the human
+        toggles." Latency inherits Confer's 2-3 min target (k7m3pq2x). The
+        feature is realized by the decisions below: presence storage
+        (pf4nqkx7), a toggle surface (tg7nqkp4), Stop-hook enforcement
+        (eh7nqkp4), auto-return on keyboard input (ar7nqkp4), and an explicit
+        installer (ii7nqkp4).
+
+    Presence As A Workstation File = decision:
+      id: pf4nqkx7
+      why: >
+        Presence — "is daniel at THIS workstation?" — is stored as a small
+        file in XDG_RUNTIME_DIR (confer.presence): file present (JSON with an
+        optional note + since-timestamp) means away, file absent means present.
+        Considered the riffed alternative of holding presence as daemon
+        in-memory state behind new SetPresence/GetPresence IPC: rejected. The
+        enforcement point (eh7nqkp4) is a GLOBAL Claude Code Stop hook that
+        fires on every session-stop daniel ever makes, confer-related or not;
+        putting a Unix-socket round-trip to a daemon that often is not running
+        on that hot path adds latency and a failure mode to thousands of
+        unrelated stops, whereas a file stat is microseconds with no
+        dependency. Presence is also a workstation-locality fact, not a
+        Discord/messaging fact, so the daemon (whose single job is multiplexing
+        the Gateway, dq7n3xpk) is the wrong home for it. File-exists semantics
+        are atomic, and "XDG_RUNTIME_DIR clears on reboot" gives the correct
+        default (a reboot means you are back at the machine). The daemon needs
+        no presence knowledge for this feature: the agent, nudged by the hook,
+        decides to call ask/notify; the daemon relays exactly as it always has.
+        Cross-session sharing — the "cool enhancement" daniel assumed isolation
+        would forbid — falls out for free, because XDG_RUNTIME_DIR is per-user
+        shared for the same reason the central daemon (dq7n3xpk) is shared;
+        isolation was never the obstacle. A daemon flag can still be added
+        later if the daemon itself ever needs presence-aware behavior.
+
+    Toggle Surface confer away/back/presence = decision:
+      id: tg7nqkp4
+      why: >
+        The toggle is three `confer` CLI subcommands — `confer away [--note]`,
+        `confer back`, `confer presence` — that read/write the presence file
+        (pf4nqkx7) directly and never touch the daemon. One command from any
+        window (or `! confer away` inside a session) flips global state.
+        `--note` lets daniel leave a hint ("back after lunch") that the Stop
+        hook can surface to agents. For in-session ergonomics, ii7nqkp4 also
+        installs `/away` and `/back` slash commands as thin wrappers that run
+        the CLI. Considered making the slash commands the primary surface:
+        rejected as primary because a slash command only injects prompt text
+        into one session, which is exactly the per-window friction the goal
+        (aw7nqkp4) forbids; the CLI writing shared file state is what makes
+        one command global.
+
+    Enforcement Via Stop Hook = decision:
+      id: eh7nqkp4
+      why: >
+        Enforcement is a global Claude Code `Stop` hook (`confer hook stop`),
+        because the daemon cannot make a Claude session do anything — only the
+        Claude Code side can. When away, on a session trying to end its turn,
+        the hook blocks the stop (exit 2 with the instruction on stderr, the
+        mechanism Claude Code feeds back to the model) telling the agent to
+        reach daniel via confer — ask for a decision, notify if only reporting
+        — instead of idling at a terminal nobody is watching. Loop safety is
+        two-layered: (a) honor stop_hook_active — never re-block a stop that is
+        itself the continuation of a prior block; (b) inspect the transcript
+        and do not block if the agent already used an mcp__confer__* tool since
+        the last human turn (it already reached out). The hook FAILS OPEN on
+        every uncertain path — present, unparseable transcript, missing file,
+        any exception → allow the stop — so it can never wedge unrelated,
+        non-confer sessions; an opt-in away mode that occasionally under-nudges
+        is acceptable, one that can hang every session on this machine is not.
+        Considered enforcement via injected CLAUDE.md/AGENTS.md text (static,
+        un-toggleable, fades after compaction, soft) and via a per-session
+        slash-command instruction (the tier-A approach — still per-window and
+        soft): both kept only as manual fallbacks. The Stop hook is the one
+        mechanism that is simultaneously global, dynamically toggleable, and
+        deterministic.
+
+    Auto-Return On Keyboard Input = decision:
+      id: ar7nqkp4
+      why: >
+        A `UserPromptSubmit` hook (`confer hook prompt`) clears presence to
+        "present" whenever daniel types a prompt in ANY session — if he is at a
+        keyboard, he is back, everywhere. This is safe precisely because Discord
+        replies arrive through the confer MCP path (an ask's return value or
+        check_messages), never through Claude Code's prompt input, so answering
+        from his phone does NOT trip the hook; only real terminal typing does.
+        The hook is side-effect-only: it runs `confer back` and exits 0 so the
+        prompt proceeds unchanged. `confer back` remains for explicitly ending
+        away mode without typing into a session. Considered requiring an
+        explicit `confer back` always: rejected as needless friction given the
+        keyboard signal is unambiguous and free.
+
+    Integrations Installed Explicitly = decision:
+      id: ii7nqkp4
+      why: >
+        The Stop and UserPromptSubmit hooks and the `/away` `/back` slash
+        commands are written into ~/.claude/settings.json and
+        ~/.claude/commands by an explicit `confer install-hooks` step (also
+        offered as `confer setup --integrations`), never silently — because it
+        mutates daniel's GLOBAL Claude Code configuration, which is too invasive
+        to do as a side effect. The writer is idempotent (re-running never
+        duplicates an entry) and MERGES into existing settings rather than
+        clobbering other hooks, and it resolves `confer` to an absolute path so
+        the hook runs regardless of the hook process's PATH. This composes with
+        confer setup Subcommand (st7nqkp4). Considered auto-installing during
+        `confer setup`: rejected — global-harness mutation must be opt-in.
+
     # ─── DISTRIBUTION ────────────────────────────────────────────────────────
 
     Distribute Via uv tool install = decision:
