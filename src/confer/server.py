@@ -39,6 +39,12 @@ USE the `check_messages` tool when:
 - Before making a major decision the user might want to redirect.
 - After a long-running operation completes, before you assume the original
   plan still applies.
+- Whenever a `notify` or `ask` result tells you messages are waiting (it
+  will say "(N messages waiting — call check_messages)" or
+  "[confer: N ... waiting]"). The user's input only reaches you when you
+  check, so check at points you can actually detect — after a long
+  operation, at the top of each work iteration, before an irreversible
+  action — rather than trying to track elapsed time.
 The tool returns a string. If empty/no-messages, it says so explicitly.
 If non-empty, each message is anchored by source: [broadcast] (a sweeping
 instruction sent to all agents), [re <tag>] (a reply addressed to one of

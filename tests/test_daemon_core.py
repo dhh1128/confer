@@ -1378,3 +1378,72 @@ def test_make_thread_tag_is_4_base32_chars():
     tag = _make_thread_tag()
     assert len(tag) == 4
     assert all(c in "abcdefghijklmnopqrstuvwxyz234567" for c in tag)
+
+
+# ─── piggyback hint (pb7nqm4x) ──────────────────────────────────────────────
+
+
+async def test_notify_info_appends_pending_hint_when_queue_nonempty():
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon, "confer/main")
+    daemon._enqueue_message("confer/main", "earlier broadcast", source="broadcast", tag=None)
+    await daemon._handle_notify(
+        Notify(request_id="n1", message="build done"), writer, "confer/main"
+    )
+    nr = next(m for m in _written_messages(writer) if isinstance(m, NotifyResult))
+    assert "1 message waiting — call check_messages" in nr.info
+
+
+async def test_notify_info_no_hint_when_queue_empty():
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon, "confer/main")
+    await daemon._handle_notify(
+        Notify(request_id="n1", message="build done"), writer, "confer/main"
+    )
+    nr = next(m for m in _written_messages(writer) if isinstance(m, NotifyResult))
+    assert "waiting" not in nr.info
+
+
+async def test_notify_failure_status_skips_hint():
+    daemon = _make_daemon()
+    daemon._transport.notify = AsyncMock(return_value=f"{FAILURE_PREFIX}boom>")
+    writer = await _hello_and_get_writer(daemon, "confer/main")
+    daemon._enqueue_message("confer/main", "x", source="broadcast", tag=None)
+    await daemon._handle_notify(
+        Notify(request_id="n1", message="build done"), writer, "confer/main"
+    )
+    nr = next(m for m in _written_messages(writer) if isinstance(m, NotifyResult))
+    assert nr.status == "failed"
+    assert "waiting" not in nr.info
+
+
+async def test_ask_reply_carries_pending_count():
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon)
+    # A broadcast arrived for this label while the ask was open.
+    daemon._enqueue_message("confer/main", "stop", source="broadcast", tag=None)
+    await daemon._dispatch_user_message(f"re {pending.tag} ok")
+    reply = next(m for m in _written_messages(writer) if isinstance(m, AskReply))
+    assert reply.pending_count == 1
+
+
+async def test_ask_timeout_carries_pending_count():
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
+    daemon._enqueue_message("confer/main", "stop", source="broadcast", tag=None)
+    await asyncio.sleep(0.05)
+    to = next(m for m in _written_messages(writer) if isinstance(m, AskTimeout))
+    assert to.pending_count == 1
+
+
+def test_pending_count_and_hint_helpers():
+    daemon = _make_daemon()
+    assert daemon._pending_count("nope") == 0
+    assert daemon._pending_hint("nope") == ""
+    daemon._enqueue_message("L", "a", source="broadcast", tag=None)
+    daemon._enqueue_message("L", "b", source="broadcast", tag=None)
+    assert daemon._pending_count("L") == 2
+    assert "2 messages waiting" in daemon._pending_hint("L")
+    daemon._queues["L"].clear()
+    daemon._enqueue_message("L", "c", source="broadcast", tag=None)
+    assert "1 message waiting" in daemon._pending_hint("L")

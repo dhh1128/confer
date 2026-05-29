@@ -737,3 +737,83 @@ async def test_check_messages_returns_disconnect_on_unexpected_response_type(tmp
         result = await c.check_messages()
         assert result == _CHECK_MESSAGES_DISCONNECT_DIRECTIVE
         await c.close()
+
+
+# ───── piggyback hint (pb7nqm4x) ────────────────────────────────────────────
+
+
+async def test_ask_reply_appends_bracketed_hint_when_messages_waiting(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        writer.write(encode(AskReply(request_id=ask.request_id, content="postgres",
+                                     pending_count=2)))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("db?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result.startswith("postgres")
+        assert "[confer: 2 other messages waiting" in result
+        await c.close()
+
+
+async def test_ask_reply_no_hint_when_no_messages(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        writer.write(encode(AskReply(request_id=ask.request_id, content="postgres",
+                                     pending_count=0)))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("db?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result == "postgres"
+        await c.close()
+
+
+async def test_ask_timeout_appends_hint_when_messages_waiting(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        ask = decode(await reader.readline())
+        writer.write(encode(AskTimeout(request_id=ask.request_id,
+                                       outcome="use_best_judgment", pending_count=1)))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.ask("q?", give_up_after_seconds=60, on_timeout="use_best_judgment")
+        assert result.startswith(_TIMEOUT_DIRECTIVES["use_best_judgment"])
+        assert "[confer: 1 other message waiting" in result
+        await c.close()
+
+
+def test_pending_note_singular_and_plural():
+    from confer.client import _pending_note
+    assert "1 other message waiting" in _pending_note(1)
+    assert "3 other messages waiting" in _pending_note(3)

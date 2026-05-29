@@ -193,3 +193,18 @@ def test_list_asks_result_roundtrips():
         count=1,
     )
     assert _roundtrip(msg) == msg
+
+
+def test_ask_reply_with_pending_count_roundtrips():
+    msg = AskReply(request_id="r1", content="yes", pending_count=3)
+    assert _roundtrip(msg) == msg
+
+
+def test_ask_reply_pending_count_defaults_zero():
+    msg = AskReply(request_id="r1", content="yes")
+    assert msg.pending_count == 0
+
+
+def test_ask_timeout_with_pending_count_roundtrips():
+    msg = AskTimeout(request_id="r1", outcome="abort", pending_count=2)
+    assert _roundtrip(msg) == msg

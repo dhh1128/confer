@@ -57,6 +57,7 @@ class AskBegin:
 class AskReply:
     request_id: str
     content: str
+    pending_count: int = 0  # other messages waiting in the agent's queue
     kind: Literal["ASK_REPLY"] = "ASK_REPLY"
 
 
@@ -64,6 +65,7 @@ class AskReply:
 class AskTimeout:
     request_id: str
     outcome: Literal["use_best_judgment", "abort"]
+    pending_count: int = 0  # other messages waiting in the agent's queue
     kind: Literal["ASK_TIMEOUT"] = "ASK_TIMEOUT"
 
 

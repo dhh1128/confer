@@ -390,6 +390,11 @@ class Daemon:
         body = f"[{tag}] {client_label}: {msg.message}"
         info = await self._transport.notify(body)
         status = "failed" if info.startswith(FAILURE_PREFIX) else "ok"
+        # Piggyback hint (pb7nqm4x): fold a pending-message count into the
+        # notify status string, only on success (the status string is
+        # confer-authored, so appending to it pollutes nothing).
+        if status == "ok":
+            info += self._pending_hint(client_label)
         await self._send(
             writer,
             NotifyResult(request_id=msg.request_id, status=status, info=info),
@@ -547,7 +552,11 @@ class Daemon:
         with suppress(Exception):
             await self._send(
                 pending.writer,
-                AskReply(request_id=pending.request_id, content=content),
+                AskReply(
+                    request_id=pending.request_id,
+                    content=content,
+                    pending_count=self._pending_count(pending.label),
+                ),
             )
 
     def _enqueue_message(
@@ -620,7 +629,9 @@ class Daemon:
             await self._send(
                 pending.writer,
                 AskTimeout(
-                    request_id=pending.request_id, outcome=pending.on_timeout
+                    request_id=pending.request_id,
+                    outcome=pending.on_timeout,
+                    pending_count=self._pending_count(pending.label),
                 ),
             )
         await self._send_dm_best_effort(
@@ -667,6 +678,20 @@ class Daemon:
         self._notify_threads[tag] = _NotifyThread(
             tag=tag, label=label, created_at=time.monotonic()
         )
+
+    def _pending_count(self, label: str) -> int:
+        """Number of messages waiting in a label's check_messages queue —
+        the piggyback hint count (pb7nqm4x)."""
+        queue = self._queues.get(label)
+        return len(queue) if queue else 0
+
+    def _pending_hint(self, label: str) -> str:
+        """Suffix appended to confer-authored status strings when the agent
+        has queued messages, nudging it to drain via check_messages."""
+        n = self._pending_count(label)
+        if n == 0:
+            return ""
+        return f" ({n} message{'s' if n != 1 else ''} waiting — call check_messages)"
 
     def _active_tags(self) -> set[str]:
         return {p.tag for p in self._pending_asks.values()} | set(

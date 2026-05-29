@@ -56,6 +56,13 @@ _CHECK_MESSAGES_DISCONNECT_DIRECTIVE = (
 )
 
 
+def _pending_note(n: int) -> str:
+    """Bracketed confer meta-note appended to an ask result when other
+    messages are waiting (pb7nqm4x). Distinct from the user's own words."""
+    plural = "s" if n != 1 else ""
+    return f"[confer: {n} other message{plural} waiting — call check_messages]"
+
+
 class DaemonClient:
     def __init__(self, label_preferred: str | None = None) -> None:
         self._label_preferred = (
@@ -134,11 +141,20 @@ class DaemonClient:
             self._pending_ask_request_ids.discard(request_id)
             self._pending.pop(request_id, None)
         if isinstance(response, AskReply):
+            # The reply is the user's verbatim words; if other messages are
+            # waiting, append the piggyback hint as a clearly bracketed
+            # confer meta-note so it can't be mistaken for the user's text
+            # (Pending-Message Piggyback Hint, pb7nqm4x).
+            if response.pending_count > 0:
+                return f"{response.content}\n\n{_pending_note(response.pending_count)}"
             return response.content
         if isinstance(response, AskTimeout):
-            return _TIMEOUT_DIRECTIVES.get(
+            directive = _TIMEOUT_DIRECTIVES.get(
                 response.outcome, _DAEMON_DISCONNECT_DIRECTIVE
             )
+            if response.pending_count > 0:
+                return f"{directive} {_pending_note(response.pending_count)}"
+            return directive
         return _DAEMON_DISCONNECT_DIRECTIVE
 
     async def check_messages(self) -> str:
