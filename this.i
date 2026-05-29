@@ -650,6 +650,13 @@ Confer = goal:
         Tests exercise route_user_message directly with synthetic
         pending_asks lists.
 
+        REVISED IN G3 by Tag Based Reply Routing (rt7nqp4m): the pure function
+        gains the set of active threads (asks + notify-threads, each with its
+        tag) and returns the widened RouteDecision union (tag-targeted deliver,
+        notify-interjection enqueue, broadcast, bounce, ambiguous, plus a
+        concierge-stub variant for a leading "."). The pure-function-in-
+        routing.py shape and its isolation-testability rationale are unchanged.
+
     # ─── TOOL SURFACE ────────────────────────────────────────────────────────
 
     Three Tools = decision:
@@ -763,6 +770,12 @@ Confer = goal:
         Changes (qn7pkm4v). Renamed from "Wait Forever Re-Pings" to reflect
         that re-pings are now universal, not wait_forever-specific.
 
+        REVISED IN G3: the re-ping body adopts the "Re: {tag} — still waiting
+        on your answer" anchoring of Threaded DM Conventions (dm5kqv7n), and
+        the recomputed Reply Routing Footer is gone (the tag is printed inline
+        instead). The per-ask asyncio.Task shape and skip-near-deadline rule
+        are unchanged.
+
     check_messages In-Memory State = decision:
       id: 5pq7n3kw
       why: >
@@ -803,6 +816,14 @@ Confer = goal:
         crosses the MCP boundary as ordinary prose the agent's reasoning
         handles directly.
 
+        REVISED IN G3: queued entries now carry the originating thread tag,
+        and the formatted output anchors each with "Re: {tag}" so the agent
+        can correlate an interjection with the notify it answers. The source
+        kinds become "broadcast", "notify_reply" (a tagged reply to one of the
+        agent's notify-threads, per Notify Replyable Threads nr4kpq7v), and
+        "late_reply"; "labeled_interjection" is retired with label-addressing
+        (rt7nqp4m).
+
     Broadcast Semantics = decision:
       id: bw4kqnxp
       why: >
@@ -823,6 +844,14 @@ Confer = goal:
         the user's mechanism for narrowing to one agent (rule 1); without
         a prefix, broadcast-to-all is the safer interpretation of "this is
         a sweeping instruction."
+
+        REVISED IN G3 by Tag Based Reply Routing (rt7nqp4m): broadcast (the
+        zero-asks-pending, no-tag case) is retained exactly as described here.
+        The label-prefixed targeted-interjection path below is DROPPED with
+        label-addressing; the targeted-interjection need is now served by
+        replying to a specific notify's tag (Notify Replyable Threads,
+        nr4kpq7v) rather than by an agent-label prefix. The paragraph below is
+        retained for history; read nr4kpq7v for the current targeted path.
 
         Phase 2D also activates the half of 7kxpvnqj rule (1) that 2C
         papered over: a label-prefix match against a CONNECTED CLIENT
@@ -976,6 +1005,15 @@ Confer = goal:
         Broadcast Semantics. (d) The footer mechanics described in this
         rule are implemented per Reply Routing Footer (xqp4nv7m).
 
+        REVISED IN G3 by Tag Based Reply Routing (rt7nqp4m): rules (1)-(5)
+        are reworked around thread tags. The numeric shortcut (rule 2) and
+        label-prefix addressing (rule 1) are DROPPED; the per-message footer
+        is removed (dm5kqv7n). Broadcast (rule 4), the single-ask shortcut
+        (rule 3), and the ambiguity bounce (rule 5) survive, now keyed on
+        awaiting ASK-threads. Read rt7nqp4m as the current ladder; this node
+        is retained for the why behind broadcast and the rejected
+        reply-to-message alternative.
+
     Ask Closing Notifications = decision:
       id: pkn7mvq4
       why: >
@@ -1003,6 +1041,18 @@ Confer = goal:
         channel is the user's only window into agent state. Considered
         including timestamps, attempt counters, or durations in the DM body:
         rejected as noise.
+
+        REVISED IN G3 (gaps.md F-A fix): the "reply-resolved is silent" rule
+        carves out CLI-resolved asks. The rationale for silence — "the user
+        just typed the answer, so they know" — holds only when the answer was
+        typed on Discord. When an ask is resolved via the phase-3 `confer
+        answer` CLI (CLI Inject Tool, ci7n4pvm), the Discord-side user did NOT
+        type anything and would otherwise see the question DM sit open forever.
+        So a CLI-resolved ask now sends a closing DM: "Re: {tag} — answered
+        from the laptop." Discord-typed replies remain silent. All closing/
+        disconnect/withdrawn DMs adopt the "Re: {tag} — ..." anchoring of
+        Threaded DM Conventions (dm5kqv7n) instead of restating the full
+        question.
 
     ASK_CANCEL Protocol = decision:
       id: 3mq7pvxn
@@ -1051,7 +1101,150 @@ Confer = goal:
         the responsibility to the daemon avoids a callback the transport
         would otherwise need. Considered a static footer computed once at
         ask-time: rejected because re-ping context drifts as the pending
-        set evolves.
+        set evolves. SUPERSEDED IN G3 by Threaded DM Conventions (dm5kqv7n):
+        the appended footer is removed entirely; each DM now prints its own
+        thread tag inline as the routing referent, so there is no separate
+        footer to compose or recompute.
+
+    # ─── THREADED CHANNEL (G3) ───────────────────────────────────────────────
+    # Surfaced by end-to-end smoke testing 2026-05-29 (docs/gaps.md G3): with
+    # several same-label question DMs visible in scrollback, daniel could not
+    # tell confer which one he meant to answer. Resolved by a thread-tag model
+    # with email-style "Re:" addressing. These decisions revise the routing and
+    # footer decisions above (7kxpvnqj, xqp4nv7m) and the closing/re-ping text.
+
+    Thread Tag Model = decision:
+      id: tgq4n7px
+      why: >
+        Each ask and each notify is a "thread" — the unit of daniel's attention
+        in the channel, finer-grained than an agent (a single agent may own
+        several threads across its life; an 8-hour agent that needs help at
+        hours 1, 4, 7 opens three threads). The daemon assigns every thread a
+        random 4-char base32 tag (alphabet [a-z2-7], same as this.i node ids),
+        unique among currently-active threads, regenerating on collision the
+        way Auto-Derived Agent Labels (gj7wnq4p) disambiguates labels. The tag
+        is a terse ADDRESSING REFERENT, not an editorial subject: daniel reads
+        the full message to answer anyway, so a meaningful summary adds little
+        over a short token he can put after "Re:". Considered agent-supplied
+        subjects (email-subject-line analogy): rejected as overkill — the full
+        message is always read, and a subject parameter would add agent-facing
+        contract load, violating Minimal Agent Surface Operator Config
+        (mk7npq4x). Daemon-assigned-always leaves the agent contract unchanged.
+        Considered a monotonic counter (#1, #2): rejected because counters are
+        ephemeral and collide with reply prose; opaque base32 reads as native
+        to the system and is scrollback-stable.
+
+    Threaded DM Conventions = decision:
+      id: dm5kqv7n
+      why: >
+        Every confer DM anchors to its thread so the channel reads as the
+        threaded conversation daniel actually has in mind. Question and notify
+        DMs lead with tag and agent label: "[k3qp] confer/main: <body>".
+        Follow-up DMs about an existing thread (closing notifications per
+        pkn7mvq4, re-pings per hj7m4qbx) use email-style "Re:" anchoring:
+        "Re: k3qp — time's up; agent will use its best judgment." SUPERSEDES
+        Reply Routing Footer (xqp4nv7m): the inline per-message tag is the
+        routing referent now, so the appended "(reply: ...)" footer is removed
+        on every DM. Considered keeping a footer listing all open tags:
+        rejected as redundant once each message prints its own tag, and noisy
+        as the open set grows. Derivative of Acknowledge Actionable State
+        Changes (qn7pkm4v) — the anchor is what lets daniel separate threads
+        at a glance with minimal cognitive load.
+
+    Tag Based Reply Routing = decision:
+      id: rt7nqp4m
+      why: >
+        Rewrites the routing ladder of Reply Routing Rules (7kxpvnqj) around
+        thread tags. Incoming user DM, in order:
+
+        (1) TAG MATCH. Phone-tolerant: case-insensitive; stray punctuation
+            (: , .) and spacing ignored; an optional leading reply marker (the
+            letters "re", any case, optional trailing :/,). WITH the marker the
+            next token matches an active tag by UNIQUE PREFIX ("re k3" hits
+            k3qp if unique; >1 match -> ambiguity bounce). WITHOUT the marker
+            only an EXACT full 4-char tag at the start counts ("k3qp answer is
+            x") — a bare prefix with no marker is NOT a tag (too ambiguous
+            against ordinary prose). Remainder is the reply content. Matched
+            thread: an ask -> ASK_REPLY; a notify -> queued interjection (see
+            Notify Replyable Threads, nr4kpq7v).
+
+        (2) Else exactly one ASK awaiting -> that ask (next-message-wins,
+            vk3qn7fp).
+
+        (3) Else two+ asks awaiting -> ambiguity bounce listing awaiting asks
+            with their tags.
+
+        (4) Else no asks awaiting and >=1 agent connected -> broadcast to every
+            connected agent's check_messages queue (the sweeping interject,
+            "everyone stop").
+
+        (5) Else (no agents connected) -> bounce.
+
+        Only ASK-threads participate in steps 2-4; notify-threads are
+        addressable by explicit tag only (step 1) and never suppress the
+        single-ask shortcut or broadcast — else accumulated notifies would
+        wreck the common case. DROPS two behaviors from 7kxpvnqj: the numeric
+        shortcut (1,2,3 — superseded by scrollback-stable tags) and label-
+        prefix addressing (a tag is a finer referent; broadcast covers
+        "address everyone" and per-thread tags cover the rest, so addressing a
+        whole agent by label earned no remaining use). Considered Discord
+        native reply-to-message: rejected again per vk3qn7fp (mobile tap).
+        Reduces but does not fully close Reply Disambiguation When Proactive
+        Arrives Mid-Ask (rk2nq7pm).
+
+    Notify Replyable Threads = decision:
+      id: nr4kpq7v
+      why: >
+        A notify creates a replyable thread, not just a fire-and-forget ping.
+        Replying to a notify's tag ("re m4qp roll it back") enqueues the reply
+        into that agent's check_messages queue tagged with the thread, so the
+        agent picks it up on its next check — the precise-target version of the
+        interjection daniel wanted ("actually, roll it back" right after
+        "deploy finished"). Notify tags are addressable only while the
+        originating agent is connected; on disconnect the tag dies and a reply
+        bounces (Asymmetric Robustness, wq7knm3p — no preservation across agent
+        death). A modest per-agent cap on live notify tags keeps the prefix
+        space sparse; oldest expires first. Considered keeping notify purely
+        fire-and-forget: rejected because daniel explicitly wants to talk back
+        to an unsolicited ping, and the room/memo metaphor makes any memo
+        answerable. Considered persisting notify tags past disconnect: rejected
+        per Asymmetric Robustness.
+
+    Concierge Sigil Reservation = decision:
+      id: cg7vnq4p
+      why: >
+        A leading "." on a user DM is reserved for daemon-directed (concierge)
+        messages — addressing the daemon itself, not any agent. Checked BEFORE
+        punctuation-stripping and before the routing ladder, so a "." message
+        never broadcasts to agents. Phase G3 ships only a STUB: a "."-prefixed
+        DM bounces with "concierge commands aren't available yet." The command
+        set is deferred (see tension Direct Daemon Concierge Channel,
+        dc7kqn4v). Reserving the sigil now prevents a future concierge feature
+        from colliding with thread-replies/broadcast or retraining daniel's
+        muscle memory. Chose "." over "!" because "." is on the phone's main
+        keyboard with no shift / no punct-mode toggle (daniel types one-handed
+        on mobile), and the *nix dotfile convention (hidden/system) is an apt
+        analogy for "infrastructure, not content." Chose a plain-text sigil
+        over Discord native slash commands because "/" triggers Discord's
+        slash-command autocomplete UI on mobile and confer registers no
+        application commands.
+
+    Terse Reply Vocabulary = decision:
+      id: tv4nqk7p
+      why: >
+        To minimize daniel's reply burden (thumb-typing on mobile), the server
+        instructions block documents a small recommended shorthand vocabulary
+        the agent should interpret: e.g. "stop" = halt and await further
+        instructions; "go"/"bj" = use best judgment and run to completion
+        without further check-ins. Replies pass through VERBATIM — there is no
+        daemon-side expansion machinery. Considered daemon expansion (terse ->
+        full directive before the agent sees it): rejected because it would
+        make the daemon AUTHOR meaning on the user's behalf, cutting against
+        Spokesperson Abstraction Principle (vj4xqn7p, the daemon is a conduit),
+        and would add a vocabulary/config surface to maintain. Since the agent
+        is an LLM that understands natural language, a documented shared
+        shorthand gets the terseness without machinery, and daniel is never
+        locked to the vocabulary — he can always dictate something longer.
 
     # ─── NAMING ──────────────────────────────────────────────────────────────
 
@@ -1303,6 +1496,28 @@ Confer = goal:
         (label, content) from any source, and the CLI sends the same
         routing-rule-compatible content as a Discord DM would.
       resolved-by: dh, 2026-05-29
+
+    Direct Daemon Concierge Channel = tension:
+      id: dc7kqn4v
+      nature: >
+        daniel wants to address the daemon directly, not only the agents it
+        intermediates: read queries ("what threads are open?", "how much time
+        is left to respond?", "which model is active on that agent?", "how long
+        has this agent been running?") and bulk commands ("say no to every
+        thread", "tell all agents to go to sleep"). This is a distinct design
+        surface — a control/observability channel spanning both the Discord DM
+        channel (via the reserved "." sigil, Concierge Sigil Reservation
+        cg7vnq4p) and the `confer` CLI (a natural home for the same
+        queries/commands alongside the existing confer-daemon status). It
+        overlaps daemon STATUS but is richer and partly mutating. Deferred in
+        G3 to a stub bounce; the sigil is reserved so the grammar has room.
+      revisit-when: >
+        daniel has felt the absence in real use (wanting to query or steer the
+        fleet without per-thread replies), OR the number of concurrent agents
+        grows enough that bulk operations ("sleep all", "no to all") become a
+        frequent need. Likely shape: a small verb set parsed after the "."
+        sigil, read verbs reusing daemon state already exposed to STATUS, plus
+        a few guarded mutating verbs that fan out to agents' inboxes.
 
     Policy-Backed Spokesperson Substitution Pending = tension:
       id: vkqmn7p4
