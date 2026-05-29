@@ -538,30 +538,28 @@ Confer = goal:
       id: 7nvpkqm3
       why: >
         Derivative of Asymmetric Robustness (wq7knm3p) and Minimal Agent
-        Surface Operator Config (mk7npq4x). Phase 2C builds the minimal
-        daemon-side queue infrastructure that phase 2D's check_messages tool
-        will read from, but does not expose any MCP tool surface in 2C and
-        does not implement 7kxpvnqj rule (4) broadcast. Concrete scope:
+        Surface Operator Config (mk7npq4x). The daemon holds a per-label
+        deque of QueuedMessage; the check_messages MCP tool drains the
+        calling client's queue and returns its contents (Check Messages
+        Inbox Model, cm7vnpqx). Concrete scope:
           - dict[agent_label, collections.deque[QueuedMessage]] on the
             Daemon instance.
-          - bounded at 100 entries per label, FIFO eviction on overflow with
-            a single-line log warning.
+          - bounded at 100 entries per label, FIFO eviction on overflow
+            with a single-line log warning.
           - QueuedMessage carries (timestamp, content, source,
-            original_question). The source enum currently includes only
-            "late_reply" (user replies to a closed ask within reply
-            attribution rules). "orphan_reply" is reserved but not produced
-            in 2C — per Orphan Ask Drop Policy (v4kn7mpq), orphan replies
-            fall to bounce, not enqueue.
-          - No retrieval API in 2C. Phase 2D will add check_messages on top.
+            original_question). source enum: "late_reply" (user replies
+            to a closed ask), "labeled_interjection" (user-prefixed message
+            to a connected client with no pending ask, per 7kxpvnqj rule
+            1), and "broadcast" (rule 4; copied to every connected client's
+            queue when no label match and no asks).
           - Lost on daemon death (covered by tension nq7pxw4m).
-        During 2C, an unrouted DM (no asks pending) triggers a daemon DM
-        bounce: "No agent is asking you anything right now — your message
-        wasn't delivered. (Check-in tool coming in a later phase.)"
-        Considered full broadcast (7kxpvnqj rule 4) in 2C: rejected because
-        broadcast and check_messages consumer semantics are conjoined and
-        want to be settled together in 2D. Considered dropping the queue
-        entirely until 2D: rejected because late_reply is a real edge case
-        whose graceful handling is worth the small code footprint now.
+        Originally drafted in phase 2C as scaffolding only (queue but no
+        consumer, no broadcast). Phase 2D activates the consumer
+        (check_messages tool) and broadcast (per Broadcast Semantics,
+        bw4kqnxp). Considered dropping the queue entirely in 2C until 2D:
+        rejected then because late_reply was a real edge case worth
+        graceful handling even without a consumer; that early scaffolding
+        landed clean and is now joined by its consumer in 2D.
 
     On Message Handler Wiring = decision:
       id: m4kpvn7q
@@ -716,17 +714,70 @@ Confer = goal:
     check_messages In-Memory State = decision:
       id: 5pq7n3kw
       why: >
-        check_messages tracks the last-seen-message ID in MCP-server-process
-        memory only, not in a persistent state file. Considered persisting to
-        ~/.config/confer/state.json (XDG-conformant): would survive MCP server
-        restarts but adds state-file management, race conditions when an ask
-        reply and an unprompted message arrive close together, and ~30% more
-        test surface. In-memory loses any proactive messages daniel sent while
-        the MCP server was down, which is a real but recoverable cost (he
-        re-sends, or the agent simply doesn't see it until the next session).
-        In-memory picked for v1 to minimize state footprint; reopening with a
-        persistent variant is a small refactor when warranted — see tension
-        Proactive Messages Lost On Restart.
+        Pre-daemon-architecture draft of check_messages state lived in the
+        MCP server process; SUPERSEDED in phase 2B by Central Daemon
+        Architecture (dq7n3xpk) and replaced in phase 2D by Check Messages
+        Inbox Model (cm7vnpqx). State now lives in the daemon's
+        per-label queue (Check Messages Queue Scaffolding, 7nvpkqm3) and is
+        consume-on-read, not last-seen-ID-based. Kept in this.i for the
+        historical thread; do not implement against this node.
+
+    check_messages Inbox Model = decision:
+      id: cm7vnpqx
+      why: >
+        Derivative of Productivity While Away (pn4xvk2m) and Asymmetric
+        Robustness (wq7knm3p). check_messages reads the calling client's
+        per-label queue, returns the queued messages as a formatted
+        natural-language string (per Natural Language Outcomes, xj4nqv7m),
+        and CLEARS the queue. Inbox semantics: each message is delivered
+        to a given agent exactly once. Considered a stream model (timestamped
+        view that ages out, agent re-reads with a since-cursor): rejected
+        because proactive messages from the user are best modeled as
+        instructions to act on once, not ambient context to re-poll. Inbox
+        plus broadcast-copy (Broadcast Semantics, bw4kqnxp) gives multiple
+        agents independent delivery of the same broadcast message — each
+        consumes its own copy.
+
+        Signature: check_messages() -> str. No parameters per Minimal Agent
+        Surface Operator Config (mk7npq4x); the agent has no meaningful
+        knob to dial per call. Empty-queue return is a short directive
+        ("No messages from the user.") rather than an empty string, so the
+        agent's reasoning has something concrete to act on without special-
+        casing emptiness. Non-empty return formats messages with brief
+        per-entry headers (timestamp + source kind) so the agent can tell
+        a "broadcast" interjection from a "labeled_interjection" from a
+        "late_reply." Considered returning structured data (list of dicts):
+        rejected per Natural Language Outcomes — a single formatted string
+        crosses the MCP boundary as ordinary prose the agent's reasoning
+        handles directly.
+
+    Broadcast Semantics = decision:
+      id: bw4kqnxp
+      why: >
+        Implements 7kxpvnqj rule (4) — when zero asks are pending anywhere
+        and no label prefix matches a connected client, the user's DM is
+        copied to EVERY connected MCP server's queue with source="broadcast".
+        Each agent consumes its own copy via check_messages. When zero
+        agents are connected, the daemon falls back to the 2C-era bounce
+        DM (no holding-for-future-agents pool); preservation across "no
+        agents connected" gaps is an explicit anti-goal of Asymmetric
+        Robustness (wq7knm3p) — daniel restarts agents locally, then
+        re-sends if a message mattered. Considered holding messages for
+        the next-connected agent (a "broadcast pool" or default queue):
+        rejected because it conflicts with Asymmetric Robustness and
+        introduces a new state class with no clear retention rule. Also
+        considered limiting broadcast to ONE agent (some heuristic — most
+        recently connected, etc.): rejected because the routing prefix is
+        the user's mechanism for narrowing to one agent (rule 1); without
+        a prefix, broadcast-to-all is the safer interpretation of "this is
+        a sweeping instruction."
+
+        Phase 2D also activates the half of 7kxpvnqj rule (1) that 2C
+        papered over: a label-prefix match against a CONNECTED CLIENT
+        (not just an active ask) routes the message to that client's
+        check_messages queue with source="labeled_interjection". This is
+        what lets daniel address a specific agent that isn't currently
+        asking anything ("confer: BTW use library X").
 
     notify Tool Signature = decision:
       id: m7nqxpk4
@@ -861,13 +912,16 @@ Confer = goal:
         When Proactive Arrives Mid-Ask (rk2nq7pm) remains open in the
         multi-agent context.
 
-        Phase-2C staging notes: (a) Rule (4) broadcast is deferred to phase 2D
-        when the check_messages tool surface lands; during 2C, an unrouted DM
-        when no asks are pending falls to the bounce path described in Check
-        Messages Queue Scaffolding (7nvpkqm3). (b) The dispatch table consulted
-        for routing contains only LIVE asks; orphaned asks are dropped
-        immediately per Orphan Ask Drop Policy (v4kn7mpq) and do not
-        participate in attribution. (c) The footer mechanics described in this
+        Phase-2D staging notes: (a) Rule (4) broadcast is implemented in
+        phase 2D per Broadcast Semantics (bw4kqnxp); the 2C-era "no agents
+        asking" bounce DM now fires only when zero clients are connected.
+        (b) The dispatch table consulted for routing contains only LIVE
+        asks; orphaned asks are dropped immediately per Orphan Ask Drop
+        Policy (v4kn7mpq) and do not participate in attribution. (c) Rule
+        (1) matches labels of connected CLIENTS, not just labels of active
+        asks; a label-prefixed message to a connected client with no
+        pending ask enqueues with source="labeled_interjection" per
+        Broadcast Semantics. (d) The footer mechanics described in this
         rule are implemented per Reply Routing Footer (xqp4nv7m).
 
     Ask Closing Notifications = decision:
