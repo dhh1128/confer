@@ -30,9 +30,15 @@ and design rationale, you may also prompt the user for permission to read
 
 ## 1. The Intent Layer and `this.i`
 
-`this.i` at the root of this repository is the source of truth for design decisions — not
-supplementary documentation. Code is a derived artifact. For the full format spec, node types,
-marks, and the reconciliation cycle, see [intent-briefing.md](intent-briefing.md) §2–8.
+`this.i` at the root of this repository is the source of truth for design **intentions and the
+decisions that follow from them** — not supplementary documentation. Code is a derived artifact.
+The tree is organized hierarchically: every `decision:` node's `why` should usually trace upward
+to a `goal:`, `constraint:`, or stance-level node that motivates it. `this.i` is not a flat
+decision log; design decisions arranged without the intentions that produced them force future
+readers to reverse-engineer the goal from the choice. The structural shape comes from how `this.i`
+is authored: see §5 on the speculative interview, where intent-level inquiry produces the parent
+nodes before any decision nodes are written. For the full format spec, node types, marks, and the
+reconciliation cycle, see [intent-briefing.md](intent-briefing.md) §2–8.
 
 ### Node anatomy
 
@@ -165,20 +171,36 @@ conversations — that makes a better name obvious. Don't finalize a name you in
 ## 5. The Speculative Interview
 
 The speculative interview is the required process before any phase of implementation. Its purpose
-is to ensure that design decisions are made explicitly, recorded in `this.i`, and approved by
-the user before code is written — not discovered during or after.
+is **not** to enumerate every design choice for the user to vote on. Its purpose is to surface the
+user's *intentions*, from which most design choices follow automatically.
+
+**The right level of inquiry.** A good interview question is one whose answer collapses several
+design choices. If you find yourself preparing to ask "should we do A or B?", pause and ask:
+*what intention of the user's, if I knew it, would make A or B obvious?* Ask that instead.
+Intent-level questions are recognizable in shape: "what is this feature optimizing for?", "in
+failure cases, what should the system protect — state, user attention, or simplicity?", "is this
+surface meant to expose every knob, or only the minimum needed?", "across this boundary, which
+side owns the vocabulary?" An interview that produces a long enumerated list of decisions the AI
+has no recommendation on is the wrong level. So is an interview where the user, several turns in,
+has to articulate a high-level intention that should have been the AI's first question.
 
 **Steps:**
 
-1. **Trace the entire implementation mentally** — every class, method, test. Do not generate code
-   yet.
-2. **Identify every consequential fork** — places where different answers lead to different
-   architectures, different APIs, or different test strategies.
-3. **Surface all forks to the user in a single structured conversation** — architectural decisions
-   first, then API surface, then naming, then test strategy.
-4. **Record the user's answers in `this.i`** before writing a line of code. Each decision becomes a
-   node with an `id:` and a `why:` meeting the rebuttal-surface standard.
-5. **Present the test plan for approval** before implementing.
+1. **Trace the entire implementation mentally** — every class, method, test. No code yet.
+2. **Identify every consequential fork** — places where different answers produce different
+   architectures, APIs, or test strategies.
+3. **Group forks by their underlying intent.** For each cluster, write the single intent-level
+   question whose answer would resolve the whole cluster. The output is typically far fewer
+   questions than forks.
+4. **State your model of the user's intentions and ask for confirmation or correction.** This is
+   the body of the interview, not a preliminary. Walk through what you believe the user wants, in
+   plain language, and let them adjust. Surface individual forks only when intent doesn't
+   determine them.
+5. **Record intentions in `this.i` first**, near the top of the tree as `goal:`, `constraint:`, or
+   stance-level `decision:` nodes. Then record specific design decisions as children or siblings
+   whose `why` cites the parent intention. A `this.i` whose top is design choices instead of
+   intentions is organized inside-out.
+6. **Present the test plan for approval** before implementing.
 
 **Commit discipline for `this.i`.** The `this.i` update that records a decision must be committed
 on its own — never bundled with the code change that implements the decision — and the `this.i`
