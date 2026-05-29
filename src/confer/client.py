@@ -16,6 +16,8 @@ from confer.protocol import (
     AskReply,
     AskTimeout,
     Bye,
+    CheckMessages,
+    CheckMessagesResult,
     Hello,
     HelloErr,
     HelloOk,
@@ -48,6 +50,9 @@ _TIMEOUT_DIRECTIVES: dict[str, str] = {
 _DAEMON_DISCONNECT_DIRECTIVE = (
     "Lost connection to confer; question not answered. Retry or proceed "
     "without the user's input."
+)
+_CHECK_MESSAGES_DISCONNECT_DIRECTIVE = (
+    "Lost connection to confer; could not check for messages."
 )
 
 
@@ -135,6 +140,21 @@ class DaemonClient:
                 response.outcome, _DAEMON_DISCONNECT_DIRECTIVE
             )
         return _DAEMON_DISCONNECT_DIRECTIVE
+
+    async def check_messages(self) -> str:
+        """Drain the daemon-side queue for this client's label. Returns a
+        natural-language string per Check Messages Inbox Model (cm7vnpqx):
+        either a formatted multi-line summary or a directive saying no
+        messages are present."""
+        request_id = str(uuid.uuid4())
+        msg = CheckMessages(request_id=request_id)
+        try:
+            response = await self._send_and_wait(msg)
+        except RuntimeError:
+            return _CHECK_MESSAGES_DISCONNECT_DIRECTIVE
+        if isinstance(response, CheckMessagesResult):
+            return response.formatted
+        return _CHECK_MESSAGES_DISCONNECT_DIRECTIVE
 
     async def _send_ask_cancel(self, request_id: str) -> None:
         """Fire-and-forget ASK_CANCEL. Per ASK_CANCEL Protocol (3mq7pvxn)

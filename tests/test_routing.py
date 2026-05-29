@@ -1,7 +1,9 @@
 from confer.daemon.routing import (
     Ambiguous,
     Bounce,
+    Broadcast,
     Deliver,
+    EnqueueLabeled,
     PendingAsk,
     route_user_message,
 )
@@ -13,10 +15,10 @@ def _ask(request_id: str, label: str, question: str, started_at: float) -> Pendi
     )
 
 
-def test_no_pending_asks_bounces():
-    decision = route_user_message("anything", ())
+def test_no_agents_anywhere_bounces():
+    decision = route_user_message("anything", (), ())
     assert isinstance(decision, Bounce)
-    assert "No agent is asking" in decision.text
+    assert "No agent is connected" in decision.text
 
 
 def test_single_ask_unprefixed_delivers_whole_content():
@@ -169,8 +171,78 @@ def test_punctuation_only_content_with_multiple_asks_is_ambiguous():
     assert isinstance(decision, Ambiguous)
 
 
-def test_label_prefix_matches_empty_token_returns_empty():
-    """Direct unit test of the defensive guard inside _label_prefix_matches."""
-    from confer.daemon.routing import _label_prefix_matches
+def test_ask_label_matches_empty_token_returns_empty():
+    """Defensive guard inside _ask_label_matches."""
+    from confer.daemon.routing import _ask_label_matches
     asks = (_ask("r1", "confer/main", "q?", 1.0),)
-    assert _label_prefix_matches("", asks) == []
+    assert _ask_label_matches("", asks) == []
+
+
+def test_client_label_matches_empty_token_returns_empty():
+    """Defensive guard inside _client_label_matches."""
+    from confer.daemon.routing import _client_label_matches
+    assert _client_label_matches("", ("confer/main",)) == []
+
+
+# ─── phase 2D: broadcast and labeled interjection ──────────────────────────
+
+
+def test_no_asks_but_connected_clients_broadcasts():
+    """Rule 4: unprefixed message with no asks pending → Broadcast."""
+    decision = route_user_message("BTW use library X", (), ("confer/main",))
+    assert decision == Broadcast(content="BTW use library X")
+
+
+def test_no_asks_unprefixed_multi_client_still_broadcasts():
+    decision = route_user_message(
+        "stop, requirements changed", (), ("confer/main", "myapp/feat")
+    )
+    assert decision == Broadcast(content="stop, requirements changed")
+
+
+def test_label_prefix_with_no_matching_ask_routes_to_connected_client_queue():
+    """Rule 1 with no ask matching but a connected client matching: enqueue to
+    that client's queue (source="labeled_interjection")."""
+    decision = route_user_message(
+        "confer: BTW use library X", (), ("confer/main", "myapp/feat")
+    )
+    assert decision == EnqueueLabeled(label="confer/main", content="BTW use library X")
+
+
+def test_label_prefix_matches_multiple_clients_bounces_with_disambiguation_hint():
+    """Two connected clients share the prefix, no asks: bounce with a hint."""
+    decision = route_user_message(
+        "confer hello", (), ("confer/main", "confer/feat")
+    )
+    assert isinstance(decision, Bounce)
+    assert "more specific prefix" in decision.text
+
+
+def test_label_prefix_to_ask_takes_precedence_over_connected_client():
+    """When a label matches both an ask AND a connected client, the ask wins
+    (rule 1 short-circuits on the first ask match)."""
+    asks = (_ask("r1", "confer/main", "rebase?", 1.0),)
+    decision = route_user_message(
+        "confer yes", asks, ("confer/main", "myapp/feat")
+    )
+    assert decision == Deliver(label="confer/main", content="yes")
+
+
+def test_unknown_token_with_asks_and_connected_clients_treated_as_no_match():
+    """Token matches neither asks nor connected labels. With multiple asks
+    pending it falls to Ambiguous (rule 5)."""
+    asks = (
+        _ask("r1", "confer/main", "q1?", 1.0),
+        _ask("r2", "myapp/feat", "q2?", 2.0),
+    )
+    decision = route_user_message(
+        "nomatch hello", asks, ("confer/main", "myapp/feat")
+    )
+    assert isinstance(decision, Ambiguous)
+
+
+def test_numeric_shortcut_with_no_asks_falls_through_to_broadcast():
+    """If the user types a numeric token but there are no asks (only connected
+    clients), the numeric isn't a valid shortcut — fall through to broadcast."""
+    decision = route_user_message("1 hello", (), ("confer/main",))
+    assert decision == Broadcast(content="1 hello")

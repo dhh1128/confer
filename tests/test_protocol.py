@@ -6,6 +6,8 @@ from confer.protocol import (
     AskReply,
     AskTimeout,
     Bye,
+    CheckMessages,
+    CheckMessagesResult,
     Error,
     Hello,
     HelloErr,
@@ -146,4 +148,18 @@ def test_ask_timeout_abort_roundtrips():
 
 def test_ask_cancel_roundtrips():
     msg = AskCancel(request_id="r1")
+    assert _roundtrip(msg) == msg
+
+
+def test_check_messages_roundtrips():
+    msg = CheckMessages(request_id="r1")
+    assert _roundtrip(msg) == msg
+
+
+def test_check_messages_result_roundtrips():
+    msg = CheckMessagesResult(
+        request_id="r1",
+        formatted="[1] 2026-05-29 broadcast: hello there",
+        count=1,
+    )
     assert _roundtrip(msg) == msg

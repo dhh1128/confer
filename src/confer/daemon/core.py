@@ -14,7 +14,9 @@ from typing import Literal
 from confer.daemon.routing import (
     Ambiguous,
     Bounce,
+    Broadcast,
     Deliver,
+    EnqueueLabeled,
     PendingAsk as RoutingPendingAsk,
     route_user_message,
 )
@@ -26,6 +28,8 @@ from confer.protocol import (
     AskReply,
     AskTimeout,
     Bye,
+    CheckMessages,
+    CheckMessagesResult,
     Error,
     Hello,
     HelloErr,
@@ -100,8 +104,36 @@ def _compose_ask_footer(asks_newest_first: list["_PendingAsk"]) -> str:
 class QueuedMessage:
     timestamp: float
     content: str
-    source: Literal["late_reply"]
+    source: Literal["late_reply", "labeled_interjection", "broadcast"]
     original_question: str | None
+
+
+_SOURCE_TAGS = {
+    "late_reply": "late-reply",
+    "labeled_interjection": "for-you",
+    "broadcast": "broadcast",
+}
+
+
+def _format_queue_for_check_messages(queue) -> str:
+    """Render a deque of QueuedMessage as a natural-language string for the
+    agent (per Check Messages Inbox Model, cm7vnpqx). Empty queues return a
+    short directive so the agent's reasoning has something concrete to act
+    on."""
+    if not queue:
+        return "No new messages from the user."
+    lines: list[str] = []
+    count = len(queue)
+    header = f"{count} message{'s' if count != 1 else ''} from the user:"
+    lines.append(header)
+    lines.append("")
+    for entry in queue:
+        tag = _SOURCE_TAGS.get(entry.source, entry.source)
+        suffix = ""
+        if entry.source == "late_reply" and entry.original_question:
+            suffix = f" (was answering: {entry.original_question!r})"
+        lines.append(f"[{tag}] {entry.content}{suffix}")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -334,6 +366,9 @@ class Daemon:
         if isinstance(msg, AskCancel):
             await self._handle_ask_cancel(msg.request_id)
             return None
+        if isinstance(msg, CheckMessages):
+            await self._handle_check_messages(msg.request_id, client_label, writer)
+            return None
         await self._send(
             writer,
             Error(
@@ -379,17 +414,53 @@ class Daemon:
         arrives from the configured user. Routes via route_user_message and
         acts on the decision."""
         snapshot = [self._to_routing_ask(p) for p in self._pending_asks.values()]
-        decision = route_user_message(content, snapshot)
+        connected_labels = list(self._clients.keys())
+        decision = route_user_message(content, snapshot, connected_labels)
         if isinstance(decision, Deliver):
             await self._deliver_reply(decision.label, decision.content)
+        elif isinstance(decision, EnqueueLabeled):
+            self._enqueue_message(
+                decision.label,
+                decision.content,
+                source="labeled_interjection",
+                original_question=None,
+            )
+        elif isinstance(decision, Broadcast):
+            for label in connected_labels:
+                self._enqueue_message(
+                    label,
+                    decision.content,
+                    source="broadcast",
+                    original_question=None,
+                )
         elif isinstance(decision, Bounce):
             await self._send_dm_best_effort(decision.text)
         else:
-            # RouteDecision union is closed (Deliver | Bounce | Ambiguous),
-            # so this branch always handles Ambiguous.
+            # RouteDecision union is closed; the remaining variant is Ambiguous.
             await self._send_dm_best_effort(
                 self._format_ambiguous_dm(decision.pending_asks)
             )
+
+    async def _handle_check_messages(
+        self, request_id: str, client_label: str, writer: asyncio.StreamWriter
+    ) -> None:
+        """Drain the calling client's queue and return its contents formatted
+        as a natural-language string. Per Check Messages Inbox Model
+        (cm7vnpqx), reading clears the queue."""
+        queue = self._queues.get(client_label)
+        if queue is None or not queue:
+            formatted = _format_queue_for_check_messages(())
+            count = 0
+        else:
+            count = len(queue)
+            formatted = _format_queue_for_check_messages(queue)
+            queue.clear()
+        await self._send(
+            writer,
+            CheckMessagesResult(
+                request_id=request_id, formatted=formatted, count=count
+            ),
+        )
 
     async def _deliver_reply(self, label: str, content: str) -> None:
         # Find the (one) pending ask matching the label; route there.
@@ -414,13 +485,24 @@ class Daemon:
     def _enqueue_late_reply(
         self, label: str, content: str, original_question: str | None
     ) -> None:
+        self._enqueue_message(
+            label, content, source="late_reply", original_question=original_question
+        )
+
+    def _enqueue_message(
+        self,
+        label: str,
+        content: str,
+        source: Literal["late_reply", "labeled_interjection", "broadcast"],
+        original_question: str | None,
+    ) -> None:
         queue = self._queues.setdefault(label, deque(maxlen=_QUEUE_PER_LABEL_LIMIT))
         was_full = len(queue) == _QUEUE_PER_LABEL_LIMIT
         queue.append(
             QueuedMessage(
                 timestamp=time.time(),
                 content=content,
-                source="late_reply",
+                source=source,
                 original_question=original_question,
             )
         )

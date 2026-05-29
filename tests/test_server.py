@@ -157,3 +157,51 @@ async def test_server_instructions_describe_both_tools_and_spokesperson():
     assert "USE the `ask` tool when" in instructions
     assert "spokesperson" in instructions
     assert "on_timeout" in instructions
+
+
+# ───── check_messages tool ─────────────────────────────────────────────────
+
+
+async def test_mcp_server_registers_check_messages_tool():
+    tools = await server.mcp.list_tools()
+    assert any(t.name == "check_messages" for t in tools)
+
+
+async def test_check_messages_tool_takes_no_parameters():
+    tools = await server.mcp.list_tools()
+    tool = next(t for t in tools if t.name == "check_messages")
+    props = tool.inputSchema.get("properties", {})
+    assert props == {}
+
+
+async def test_check_messages_tool_docstring_describes_inbox_semantics():
+    tools = await server.mcp.list_tools()
+    tool = next(t for t in tools if t.name == "check_messages")
+    desc = tool.description or ""
+    assert "confer" in desc.lower()
+    assert "exactly once" in desc.lower() or "clears" in desc.lower()
+
+
+async def test_check_messages_tool_delegates_to_daemon_client():
+    fake_client = MagicMock()
+    fake_client.check_messages = AsyncMock(return_value="No new messages from the user.")
+
+    with patch.object(server, "_client", fake_client):
+        result = await server.check_messages()
+
+    assert result == "No new messages from the user."
+    fake_client.check_messages.assert_awaited_once_with()
+
+
+async def test_check_messages_tool_raises_when_client_uninitialized():
+    with patch.object(server, "_client", None):
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await server.check_messages()
+
+
+async def test_server_instructions_describe_check_messages_tool():
+    instructions = server.mcp.instructions
+    assert "check_messages" in instructions
+    assert "[broadcast]" in instructions
+    assert "[for-you]" in instructions
+    assert "[late-reply]" in instructions

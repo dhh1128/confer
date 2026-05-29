@@ -10,6 +10,7 @@ from confer import client as client_mod
 from confer.client import (
     DaemonClient,
     auto_label,
+    _CHECK_MESSAGES_DISCONNECT_DIRECTIVE,
     _DAEMON_DISCONNECT_DIRECTIVE,
     _TIMEOUT_DIRECTIVES,
 )
@@ -19,6 +20,8 @@ from confer.protocol import (
     AskReply,
     AskTimeout,
     Bye,
+    CheckMessages,
+    CheckMessagesResult,
     Error,
     Hello,
     HelloErr,
@@ -661,3 +664,76 @@ async def test_send_ask_cancel_noop_when_writer_none():
     c = DaemonClient(label_preferred="x")
     # writer never set
     await c._send_ask_cancel("nonexistent")  # must not raise
+
+
+# ───── check_messages ──────────────────────────────────────────────────────
+
+
+async def test_check_messages_returns_formatted_string(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        cm = decode(await reader.readline())
+        assert isinstance(cm, CheckMessages)
+        writer.write(encode(CheckMessagesResult(
+            request_id=cm.request_id,
+            formatted="1 message from the user:\n\n[broadcast] hi",
+            count=1,
+        )))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.check_messages()
+        assert "1 message" in result
+        assert "[broadcast] hi" in result
+        await c.close()
+
+
+async def test_check_messages_returns_disconnect_directive_on_runtime_error(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        await reader.readline()  # consume CheckMessages, then disconnect
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.check_messages()
+        assert result == _CHECK_MESSAGES_DISCONNECT_DIRECTIVE
+        await c.close()
+
+
+async def test_check_messages_returns_disconnect_on_unexpected_response_type(tmp_path, monkeypatch):
+    sock = tmp_path / "confer.sock"
+    monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
+
+    async def handler(reader, writer):
+        hello = decode(await reader.readline())
+        writer.write(encode(HelloOk(request_id=hello.request_id, label_assigned="x")))
+        await writer.drain()
+        cm = decode(await reader.readline())
+        writer.write(encode(Error(code="x", message="x", request_id=cm.request_id)))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async with _fake_daemon(handler, sock):
+        c = DaemonClient(label_preferred="x")
+        await c.connect()
+        result = await c.check_messages()
+        assert result == _CHECK_MESSAGES_DISCONNECT_DIRECTIVE
+        await c.close()

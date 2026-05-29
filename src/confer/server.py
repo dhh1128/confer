@@ -33,7 +33,20 @@ You will always receive a natural-language string answer; never a sentinel
 token or an exception. If the answer indicates no human response arrived,
 follow the directive in that string.
 
-DO NOT use `notify` or `ask` for:
+USE the `check_messages` tool when:
+- You're at a natural pause point in a long-running task and want to see
+  whether the user has sent any unsolicited input.
+- Before making a major decision the user might want to redirect.
+- After a long-running operation completes, before you assume the original
+  plan still applies.
+The tool returns a string. If empty/no-messages, it says so explicitly.
+If non-empty, each message is tagged by source: [broadcast] (a sweeping
+instruction sent to all agents), [for-you] (a message addressed to your
+specific agent), or [late-reply] (an answer to a question that timed out).
+Treat broadcasts and labeled interjections as new instructions you should
+act on. Reading clears the queue, so messages are delivered exactly once.
+
+DO NOT use `notify`, `ask`, or `check_messages` for:
 - Routine progress or status inside an active conversation (the terminal
   is the right channel for that).
 - Output the user would see by reading your reply in the chat anyway.
@@ -143,6 +156,23 @@ async def ask(
             "DaemonClient not initialized; server lifespan did not start"
         )
     return await _client.ask(question, give_up_after_seconds, on_timeout)
+
+
+@mcp.tool()
+async def check_messages() -> str:
+    """Check confer for messages the user has sent you while you were busy.
+
+    Returns a natural-language string. Empty queue returns a brief directive
+    ("No new messages from the user."). Non-empty returns a numbered summary
+    with each message tagged by source. Reading clears the queue — messages
+    are delivered exactly once per agent. See the server's instructions
+    block for when-to-use guidance.
+    """
+    if _client is None:
+        raise RuntimeError(
+            "DaemonClient not initialized; server lifespan did not start"
+        )
+    return await _client.check_messages()
 
 
 def main() -> None:

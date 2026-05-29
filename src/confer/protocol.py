@@ -74,6 +74,20 @@ class AskCancel:
 
 
 @dataclass(frozen=True)
+class CheckMessages:
+    request_id: str
+    kind: Literal["CHECK_MESSAGES"] = "CHECK_MESSAGES"
+
+
+@dataclass(frozen=True)
+class CheckMessagesResult:
+    request_id: str
+    formatted: str
+    count: int
+    kind: Literal["CHECK_MESSAGES_RESULT"] = "CHECK_MESSAGES_RESULT"
+
+
+@dataclass(frozen=True)
 class Bye:
     kind: Literal["BYE"] = "BYE"
 
@@ -111,6 +125,8 @@ Message = Union[
     AskReply,
     AskTimeout,
     AskCancel,
+    CheckMessages,
+    CheckMessagesResult,
     Bye,
     Error,
     Status,
@@ -128,6 +144,8 @@ _MESSAGE_TYPES: dict[str, type] = {
     "ASK_REPLY": AskReply,
     "ASK_TIMEOUT": AskTimeout,
     "ASK_CANCEL": AskCancel,
+    "CHECK_MESSAGES": CheckMessages,
+    "CHECK_MESSAGES_RESULT": CheckMessagesResult,
     "BYE": Bye,
     "ERROR": Error,
     "STATUS": Status,
