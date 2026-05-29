@@ -40,11 +40,20 @@ USE the `check_messages` tool when:
 - After a long-running operation completes, before you assume the original
   plan still applies.
 The tool returns a string. If empty/no-messages, it says so explicitly.
-If non-empty, each message is tagged by source: [broadcast] (a sweeping
-instruction sent to all agents), [for-you] (a message addressed to your
-specific agent), or [late-reply] (an answer to a question that timed out).
-Treat broadcasts and labeled interjections as new instructions you should
-act on. Reading clears the queue, so messages are delivered exactly once.
+If non-empty, each message is anchored by source: [broadcast] (a sweeping
+instruction sent to all agents), [re <tag>] (a reply addressed to one of
+your specific threads — a question or an earlier notify of yours), or
+[late-reply] (an answer that arrived after a question closed). Treat these
+as new instructions you should act on. Reading clears the queue, so
+messages are delivered exactly once.
+
+REPLIES ARE OFTEN TERSE. The user answers from a phone and frequently
+replies in shorthand. Interpret common shorthands fully:
+- "stop" (or "halt", "wait") = stop work on this thread and await further
+  instructions; do not proceed on your own.
+- "go", "bj", "ok", "yes" = proceed; use your best judgment and run to
+  completion without further check-ins unless something material changes.
+A reply may also be a longer dictated message; read it as natural language.
 
 DO NOT use `notify`, `ask`, or `check_messages` for:
 - Routine progress or status inside an active conversation (the terminal

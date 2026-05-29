@@ -1,161 +1,176 @@
-"""Pure reply-routing logic per Reply Routing Rules (7kxpvnqj), Reply Routing
-Parser (nqx7pmv4), and Broadcast Semantics (bw4kqnxp).
+"""Pure reply-routing logic per Tag Based Reply Routing (rt7nqp4m), which
+rewrites the earlier label-based rules (7kxpvnqj) around thread tags.
 
 The daemon's user-message dispatcher calls `route_user_message` with the
-incoming DM content, a snapshot of currently-pending asks, and the set of
-currently-connected client labels; the function returns a `RouteDecision`
-that the daemon then acts on. The function is pure (no I/O, no daemon
-state) so it can be tested in isolation.
+incoming DM content, the currently-awaiting ask-threads, the currently-
+replyable notify-threads, and the set of connected client labels; the
+function returns a `RouteDecision` the daemon acts on. The function is pure
+(no I/O, no daemon state) so it is tested in isolation.
 """
 
+import re
 import string
 from dataclasses import dataclass
 from typing import Union
 
 
-_NO_AGENTS_BOUNCE = (
+CONCIERGE_SIGIL = "."
+CONCIERGE_STUB = "concierge commands aren't available yet."
+NO_AGENTS_BOUNCE = (
     "No agent is connected right now — your message wasn't delivered. "
     "Start an agent and try again."
 )
-_AMBIGUOUS_LABEL_BOUNCE = (
-    "Your prefix matches multiple connected agents. Reply with a more "
-    "specific prefix so I know which one to address."
+AMBIGUOUS_TAG_BOUNCE = (
+    "That tag matches more than one open thread. Reply with a longer tag "
+    "(or the full 4-character tag) so I know which one you mean."
 )
 
+_TAG_LEN = 4
+# Leading "re" reply marker: the letters r-e, any case, followed by at least
+# one separator (whitespace / colon / comma). "redeploy" does NOT match
+# because 'd' is not a separator.
+_MARKER_RE = re.compile(r"^re[\s:,]+", re.IGNORECASE)
+# A tag token is a run of base32-ish characters (letters + digits 2-7). We
+# match liberally then lowercase; non-base32 tokens simply won't match a tag.
+_TOKEN_RE = re.compile(r"[A-Za-z2-7]+")
+
 
 @dataclass(frozen=True)
-class PendingAsk:
-    request_id: str
+class AskThread:
+    tag: str
     label: str
     question: str
-    started_at: float  # monotonic seconds; newer values sort first
+    started_at: float  # monotonic; newer sorts first
 
 
 @dataclass(frozen=True)
-class Deliver:
-    """Deliver to a specific live ask: ASK_REPLY back to the awaiting writer."""
+class NotifyThread:
+    tag: str
     label: str
+
+
+@dataclass(frozen=True)
+class DeliverAsk:
+    """Route to a specific awaiting ask (→ ASK_REPLY)."""
+    tag: str
     content: str
 
 
 @dataclass(frozen=True)
-class EnqueueLabeled:
-    """Enqueue to a connected client's check_messages queue (rule 1 with no
-    matching ask). source="labeled_interjection"."""
+class EnqueueNotifyReply:
+    """Route to a notify-thread's agent inbox as a tagged interjection."""
+    tag: str
     label: str
     content: str
 
 
 @dataclass(frozen=True)
 class Broadcast:
-    """Copy to every connected client's queue (rule 4). source="broadcast"."""
     content: str
 
 
 @dataclass(frozen=True)
 class Bounce:
-    text: str  # exact DM body to send back
+    text: str
 
 
 @dataclass(frozen=True)
 class Ambiguous:
-    pending_asks: tuple[PendingAsk, ...]  # newest-first; daemon formats the DM
+    asks: tuple[AskThread, ...]  # awaiting asks, newest-first
 
 
-RouteDecision = Union[Deliver, EnqueueLabeled, Broadcast, Bounce, Ambiguous]
+@dataclass(frozen=True)
+class Concierge:
+    """Leading-'.' message addressed to the daemon, not any agent."""
+    content: str
+
+
+RouteDecision = Union[
+    DeliverAsk, EnqueueNotifyReply, Broadcast, Bounce, Ambiguous, Concierge
+]
 
 
 def route_user_message(
     content: str,
-    pending_asks: tuple[PendingAsk, ...] | list[PendingAsk],
-    connected_labels: tuple[str, ...] | list[str] = (),
+    ask_threads,
+    notify_threads=(),
+    connected_labels=(),
 ) -> RouteDecision:
-    """Apply the five-rule precedence ladder from 7kxpvnqj.
+    """Apply the tag-based routing ladder (rt7nqp4m)."""
+    stripped = content.lstrip()
 
-    The function does not strip whitespace from the delivered content beyond
-    removing a successfully-matched routing prefix and its trailing separator;
-    callers may further strip if they wish.
-    """
-    asks = tuple(sorted(pending_asks, key=lambda a: a.started_at, reverse=True))
+    # Concierge sigil is checked first, before anything else — even with no
+    # agents connected, a "." message is for the daemon, never broadcast.
+    if stripped.startswith(CONCIERGE_SIGIL):
+        return Concierge(content=stripped)
+
+    asks = tuple(sorted(ask_threads, key=lambda a: a.started_at, reverse=True))
+    notifies = tuple(notify_threads)
     connected = tuple(connected_labels)
 
-    # No agents connected anywhere: nothing useful to do with the message.
     if not asks and not connected:
-        return Bounce(text=_NO_AGENTS_BOUNCE)
+        return Bounce(NO_AGENTS_BOUNCE)
 
-    token, rest = _split_first_token(content)
-
-    # Rule (2): numeric shortcut into ASKS (only if asks exist).
-    if token.isdigit() and asks:
-        idx = int(token) - 1
-        if 0 <= idx < len(asks):
-            return Deliver(label=asks[idx].label, content=rest)
-        return Ambiguous(pending_asks=asks)
-
-    # Rule (1): label-prefix match — asks first, then connected clients.
+    marker, token, rest = _parse_marker_and_token(stripped)
     if token:
-        ask_matches = _ask_label_matches(token, asks)
-        if len(ask_matches) == 1:
-            return Deliver(label=ask_matches[0].label, content=rest)
-        if len(ask_matches) > 1:
-            return Ambiguous(pending_asks=asks)
-        client_matches = _client_label_matches(token, connected)
-        if len(client_matches) == 1:
-            return EnqueueLabeled(label=client_matches[0], content=rest)
-        if len(client_matches) > 1:
-            return Bounce(text=_AMBIGUOUS_LABEL_BOUNCE)
-        # No label match anywhere; fall through to ask-shortcut / broadcast.
-
-    # Rule (3): exactly one pending ask → whole message as content.
-    if len(asks) == 1:
-        return Deliver(label=asks[0].label, content=content)
-
-    # Rule (4): zero asks pending → broadcast to all connected clients.
-    if not asks and connected:
-        return Broadcast(content=content)
-
-    # Rule (5): multiple pending asks and no usable prefix → ambiguous.
-    return Ambiguous(pending_asks=asks)
-
-
-def _split_first_token(content: str) -> tuple[str, str]:
-    """Split a token from the start of `content`.
-
-    A token is a maximal prefix of allowed characters: letters, digits, hyphen,
-    underscore, slash. Whitespace and punctuation terminate the token. Returns
-    (token, rest) where `rest` has any trailing separator stripped.
-    """
-    stripped = content.lstrip()
-    end = 0
-    for ch in stripped:
-        if ch.isalnum() or ch in "-_/":
-            end += 1
+        if marker:
+            matches = _prefix_matches(token, asks, notifies)
+            if len(matches) == 1:
+                return _route_to_thread(matches[0], rest)
+            if len(matches) > 1:
+                return Bounce(AMBIGUOUS_TAG_BOUNCE)
+            # No prefix match — fall through to the no-tag rules below.
         else:
-            break
-    token = stripped[:end]
-    rest = stripped[end:]
-    while rest and (rest[0] in string.whitespace or rest[0] in ":,;.!?-"):
-        rest = rest[1:]
-    return token, rest
+            exact = _exact_match(token, asks, notifies)
+            if exact is not None:
+                return _route_to_thread(exact, rest)
+
+    # Step (2): exactly one awaiting ask → next-message-wins, full content.
+    if len(asks) == 1:
+        return DeliverAsk(tag=asks[0].tag, content=content)
+    # Step (3): two+ awaiting asks → ambiguity bounce.
+    if len(asks) >= 2:
+        return Ambiguous(asks=asks)
+    # Step (4): no asks awaiting → broadcast to all connected agents. We are
+    # past the no-agents guard above, so at least one agent is connected.
+    return Broadcast(content=content)
 
 
-def _ask_label_matches(
-    token: str, asks: tuple[PendingAsk, ...]
-) -> list[PendingAsk]:
-    normalized = _normalize_for_match(token)
-    if not normalized:
-        return []
-    return [a for a in asks if normalized in _normalize_for_match(a.label)]
+def _route_to_thread(thread, content: str) -> RouteDecision:
+    if isinstance(thread, AskThread):
+        return DeliverAsk(tag=thread.tag, content=content)
+    return EnqueueNotifyReply(tag=thread.tag, label=thread.label, content=content)
 
 
-def _client_label_matches(
-    token: str, connected: tuple[str, ...]
-) -> list[str]:
-    normalized = _normalize_for_match(token)
-    if not normalized:
-        return []
-    return [label for label in connected if normalized in _normalize_for_match(label)]
+def _parse_marker_and_token(stripped: str) -> tuple[bool, str, str]:
+    """Return (marker_present, token_lowercased, rest_after_token)."""
+    s = stripped
+    marker = False
+    m = _MARKER_RE.match(s)
+    if m:
+        marker = True
+        s = s[m.end():]
+    tok = _TOKEN_RE.match(s)
+    if not tok:
+        return marker, "", ""
+    token = tok.group(0).lower()
+    rest = s[tok.end():]
+    rest = rest.lstrip(string.whitespace + ":,.-")
+    return marker, token, rest
 
 
-def _normalize_for_match(s: str) -> str:
-    return s.lower().replace("-", " ").replace("/", " ")
+def _all_threads(asks, notifies):
+    return list(asks) + list(notifies)
+
+
+def _prefix_matches(token: str, asks, notifies) -> list:
+    return [t for t in _all_threads(asks, notifies) if t.tag.startswith(token)]
+
+
+def _exact_match(token: str, asks, notifies):
+    if len(token) != _TAG_LEN:
+        return None
+    for t in _all_threads(asks, notifies):
+        if t.tag == token:
+            return t
+    return None

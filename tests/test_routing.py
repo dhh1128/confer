@@ -1,248 +1,188 @@
 from confer.daemon.routing import (
+    AMBIGUOUS_TAG_BOUNCE,
     Ambiguous,
+    AskThread,
     Bounce,
     Broadcast,
-    Deliver,
-    EnqueueLabeled,
-    PendingAsk,
+    Concierge,
+    DeliverAsk,
+    EnqueueNotifyReply,
+    NotifyThread,
+    NO_AGENTS_BOUNCE,
     route_user_message,
+    _parse_marker_and_token,
 )
 
 
-def _ask(request_id: str, label: str, question: str, started_at: float) -> PendingAsk:
-    return PendingAsk(
-        request_id=request_id, label=label, question=question, started_at=started_at
-    )
+def _ask(tag, label="confer/main", question="q?", started_at=1.0) -> AskThread:
+    return AskThread(tag=tag, label=label, question=question, started_at=started_at)
+
+
+def _notify(tag, label="confer/main") -> NotifyThread:
+    return NotifyThread(tag=tag, label=label)
+
+
+# ─── concierge sigil ───────────────────────────────────────────────────────
+
+
+def test_leading_dot_is_concierge_even_with_no_agents():
+    d = route_user_message(".threads", (), (), ())
+    assert d == Concierge(content=".threads")
+
+
+def test_leading_dot_after_whitespace_is_concierge():
+    d = route_user_message("  .sleep all", (_ask("k3qp"),), (), ("confer/main",))
+    assert isinstance(d, Concierge)
+    assert d.content == ".sleep all"
+
+
+# ─── no agents ─────────────────────────────────────────────────────────────
 
 
 def test_no_agents_anywhere_bounces():
-    decision = route_user_message("anything", (), ())
-    assert isinstance(decision, Bounce)
-    assert "No agent is connected" in decision.text
+    d = route_user_message("hello", (), (), ())
+    assert d == Bounce(NO_AGENTS_BOUNCE)
 
 
-def test_single_ask_unprefixed_delivers_whole_content():
-    asks = [_ask("r1", "confer/main", "rebase?", 1.0)]
-    decision = route_user_message("looks good", asks)
-    assert decision == Deliver(label="confer/main", content="looks good")
+# ─── single-ask shortcut ───────────────────────────────────────────────────
 
 
-def test_numeric_shortcut_one_indexes_newest():
-    asks = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),  # newer
-    ]
-    decision = route_user_message("1 yes", asks)
-    assert decision == Deliver(label="myapp/feat-ask", content="yes")
+def test_single_ask_unprefixed_delivers_full_content():
+    d = route_user_message("looks good", (_ask("k3qp"),), (), ("confer/main",))
+    assert d == DeliverAsk(tag="k3qp", content="looks good")
 
 
-def test_numeric_shortcut_two_indexes_second_newest():
-    asks = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),
-    ]
-    decision = route_user_message("2 no", asks)
-    assert decision == Deliver(label="confer/main", content="no")
+# ─── tag match: with marker, prefix allowed ────────────────────────────────
 
 
-def test_numeric_out_of_range_is_ambiguous():
-    asks = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),
-    ]
-    decision = route_user_message("5 hi", asks)
-    assert isinstance(decision, Ambiguous)
+def test_marker_prefix_routes_to_unique_ask():
+    asks = (_ask("k3qp", started_at=1.0), _ask("m4rs", started_at=2.0))
+    d = route_user_message("re k3 rebase please", asks, (), ("confer/main", "x/y"))
+    assert d == DeliverAsk(tag="k3qp", content="rebase please")
 
 
-def test_label_prefix_match_routes():
-    asks = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),
-    ]
-    decision = route_user_message("feat-ask: looks good", asks)
-    assert decision == Deliver(label="myapp/feat-ask", content="looks good")
+def test_marker_with_colon_and_full_tag():
+    asks = (_ask("k3qp", started_at=1.0), _ask("m4rs", started_at=2.0))
+    d = route_user_message("Re: k3qp yes", asks, (), ("a", "b"))
+    assert d == DeliverAsk(tag="k3qp", content="yes")
 
 
-def test_label_prefix_case_insensitive():
-    asks = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),
-    ]
-    decision = route_user_message("FEAT-ASK yes", asks)
-    assert decision == Deliver(label="myapp/feat-ask", content="yes")
+def test_marker_comma_form():
+    asks = (_ask("k3qp", started_at=1.0), _ask("m4rs", started_at=2.0))
+    d = route_user_message("re, k3 here is the answer", asks, (), ("a", "b"))
+    assert d == DeliverAsk(tag="k3qp", content="here is the answer")
 
 
-def test_label_prefix_hyphen_space_interchangeable():
-    asks = [
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),
-    ]
-    # "feat ask" with a space should match "feat-ask"; the second word is the
-    # delivered content (rule 3 fires after first-token consumes "feat").
-    # To test hyphen/space interchangeability, we need a multi-ask scenario
-    # so rule 3 doesn't shortcut.
-    asks2 = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-        _ask("r2", "myapp/feat-ask", "merge?", 2.0),
-    ]
-    # Use the substring "ask" which is unique to feat-ask among the two.
-    decision = route_user_message("ask sounds right", asks2)
-    assert decision == Deliver(label="myapp/feat-ask", content="sounds right")
+def test_marker_prefix_ambiguous_bounces():
+    asks = (_ask("k3qp", started_at=1.0), _ask("k3rs", started_at=2.0))
+    d = route_user_message("re k3 hi", asks, (), ("a", "b"))
+    assert d == Bounce(AMBIGUOUS_TAG_BOUNCE)
 
 
-def test_ambiguous_prefix_returns_ambiguous():
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "confer/feat", "q2?", 2.0),
-    ]
-    # "confer" matches both labels → ambiguous
-    decision = route_user_message("confer hi", asks)
-    assert isinstance(decision, Ambiguous)
-    assert len(decision.pending_asks) == 2
+def test_marker_prefix_no_match_falls_through_to_single_ask():
+    asks = (_ask("k3qp"),)
+    d = route_user_message("re zz never mind, do it", asks, (), ("confer/main",))
+    # 'zz' matches no tag; with one ask pending the whole original content wins.
+    assert d == DeliverAsk(tag="k3qp", content="re zz never mind, do it")
 
 
-def test_multiple_asks_no_prefix_is_ambiguous():
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat", "q2?", 2.0),
-    ]
-    decision = route_user_message("hello there", asks)
-    assert isinstance(decision, Ambiguous)
+# ─── tag match: without marker, full tag required ──────────────────────────
 
 
-def test_ambiguous_returns_newest_first():
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat", "q2?", 3.0),
-        _ask("r3", "extra/branch", "q3?", 2.0),
-    ]
-    decision = route_user_message("hello", asks)
-    assert isinstance(decision, Ambiguous)
-    labels = [a.label for a in decision.pending_asks]
-    assert labels == ["myapp/feat", "extra/branch", "confer/main"]
+def test_bare_full_tag_routes():
+    asks = (_ask("k3qp", started_at=1.0), _ask("m4rs", started_at=2.0))
+    d = route_user_message("k3qp answer is x", asks, (), ("a", "b"))
+    assert d == DeliverAsk(tag="k3qp", content="answer is x")
 
 
-def test_punctuation_terminates_token():
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat-ask", "q2?", 2.0),
-    ]
-    decision = route_user_message("feat-ask: looks good", asks)
-    assert decision.content == "looks good"
+def test_bare_prefix_without_marker_is_not_a_tag():
+    asks = (_ask("k3qp", started_at=1.0), _ask("m4rs", started_at=2.0))
+    # 'k3' bare (no marker) is NOT treated as a tag; two asks → ambiguous.
+    d = route_user_message("k3 answer is x", asks, (), ("a", "b"))
+    assert isinstance(d, Ambiguous)
 
 
-def test_empty_token_with_multiple_asks_is_ambiguous():
-    """Leading whitespace produces an empty token, which can't route."""
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat", "q2?", 2.0),
-    ]
-    decision = route_user_message("   hello", asks)
-    assert isinstance(decision, Ambiguous)
+# ─── notify-thread reply ───────────────────────────────────────────────────
 
 
-def test_unknown_label_prefix_with_multiple_asks_is_ambiguous():
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat", "q2?", 2.0),
-    ]
-    decision = route_user_message("nomatch hi", asks)
-    assert isinstance(decision, Ambiguous)
-
-
-def test_unknown_label_prefix_with_single_ask_delivers_full_content():
-    """With only one ask pending, a non-matching prefix falls to rule (3)
-    and the whole message becomes the reply content (next-message-wins
-    ergonomics per vk3qn7fp)."""
-    asks = [
-        _ask("r1", "confer/main", "rebase?", 1.0),
-    ]
-    decision = route_user_message("nomatch hi", asks)
-    assert decision == Deliver(label="confer/main", content="nomatch hi")
-
-
-def test_punctuation_only_content_with_multiple_asks_is_ambiguous():
-    """Content that produces an empty token (just punctuation) and multiple
-    asks: rule 1 is skipped, rule 3 doesn't apply, rule 5 fires."""
-    asks = [
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat", "q2?", 2.0),
-    ]
-    decision = route_user_message("?!?", asks)
-    assert isinstance(decision, Ambiguous)
-
-
-def test_ask_label_matches_empty_token_returns_empty():
-    """Defensive guard inside _ask_label_matches."""
-    from confer.daemon.routing import _ask_label_matches
-    asks = (_ask("r1", "confer/main", "q?", 1.0),)
-    assert _ask_label_matches("", asks) == []
-
-
-def test_client_label_matches_empty_token_returns_empty():
-    """Defensive guard inside _client_label_matches."""
-    from confer.daemon.routing import _client_label_matches
-    assert _client_label_matches("", ("confer/main",)) == []
-
-
-# ─── phase 2D: broadcast and labeled interjection ──────────────────────────
-
-
-def test_no_asks_but_connected_clients_broadcasts():
-    """Rule 4: unprefixed message with no asks pending → Broadcast."""
-    decision = route_user_message("BTW use library X", (), ("confer/main",))
-    assert decision == Broadcast(content="BTW use library X")
-
-
-def test_no_asks_unprefixed_multi_client_still_broadcasts():
-    decision = route_user_message(
-        "stop, requirements changed", (), ("confer/main", "myapp/feat")
+def test_marker_routes_to_notify_thread():
+    d = route_user_message(
+        "re m4rs roll it back",
+        (),
+        (_notify("m4rs"),),
+        ("confer/main",),
     )
-    assert decision == Broadcast(content="stop, requirements changed")
-
-
-def test_label_prefix_with_no_matching_ask_routes_to_connected_client_queue():
-    """Rule 1 with no ask matching but a connected client matching: enqueue to
-    that client's queue (source="labeled_interjection")."""
-    decision = route_user_message(
-        "confer: BTW use library X", (), ("confer/main", "myapp/feat")
+    assert d == EnqueueNotifyReply(
+        tag="m4rs", label="confer/main", content="roll it back"
     )
-    assert decision == EnqueueLabeled(label="confer/main", content="BTW use library X")
 
 
-def test_label_prefix_matches_multiple_clients_bounces_with_disambiguation_hint():
-    """Two connected clients share the prefix, no asks: bounce with a hint."""
-    decision = route_user_message(
-        "confer hello", (), ("confer/main", "confer/feat")
+def test_bare_full_tag_routes_to_notify_thread():
+    d = route_user_message(
+        "m4rs roll it back", (), (_notify("m4rs"),), ("confer/main",)
     )
-    assert isinstance(decision, Bounce)
-    assert "more specific prefix" in decision.text
-
-
-def test_label_prefix_to_ask_takes_precedence_over_connected_client():
-    """When a label matches both an ask AND a connected client, the ask wins
-    (rule 1 short-circuits on the first ask match)."""
-    asks = (_ask("r1", "confer/main", "rebase?", 1.0),)
-    decision = route_user_message(
-        "confer yes", asks, ("confer/main", "myapp/feat")
+    assert d == EnqueueNotifyReply(
+        tag="m4rs", label="confer/main", content="roll it back"
     )
-    assert decision == Deliver(label="confer/main", content="yes")
 
 
-def test_unknown_token_with_asks_and_connected_clients_treated_as_no_match():
-    """Token matches neither asks nor connected labels. With multiple asks
-    pending it falls to Ambiguous (rule 5)."""
+def test_notify_threads_do_not_count_for_single_ask_shortcut():
+    # One notify-thread, zero asks → a bare message broadcasts, not delivered
+    # to the notify (notify is explicit-tag-only).
+    d = route_user_message("everyone stop", (), (_notify("m4rs"),), ("confer/main",))
+    assert d == Broadcast(content="everyone stop")
+
+
+# ─── broadcast & ambiguity ─────────────────────────────────────────────────
+
+
+def test_no_asks_with_connected_agents_broadcasts():
+    d = route_user_message("stop, reqs changed", (), (), ("a", "b"))
+    assert d == Broadcast(content="stop, reqs changed")
+
+
+def test_two_asks_no_tag_is_ambiguous_newest_first():
     asks = (
-        _ask("r1", "confer/main", "q1?", 1.0),
-        _ask("r2", "myapp/feat", "q2?", 2.0),
+        _ask("k3qp", started_at=1.0),
+        _ask("m4rs", started_at=3.0),
+        _ask("p7tv", started_at=2.0),
     )
-    decision = route_user_message(
-        "nomatch hello", asks, ("confer/main", "myapp/feat")
-    )
-    assert isinstance(decision, Ambiguous)
+    d = route_user_message("hello", asks, (), ("a", "b", "c"))
+    assert isinstance(d, Ambiguous)
+    assert [a.tag for a in d.asks] == ["m4rs", "p7tv", "k3qp"]
 
 
-def test_numeric_shortcut_with_no_asks_falls_through_to_broadcast():
-    """If the user types a numeric token but there are no asks (only connected
-    clients), the numeric isn't a valid shortcut — fall through to broadcast."""
-    decision = route_user_message("1 hello", (), ("confer/main",))
-    assert decision == Broadcast(content="1 hello")
+def test_tag_match_takes_precedence_over_single_ask_shortcut():
+    # A bare full tag for a notify still routes to the notify even though one
+    # ask is also pending (tag match is step 1, before the single-ask step).
+    asks = (_ask("k3qp"),)
+    d = route_user_message("m4rs roll back", asks, (_notify("m4rs"),), ("confer/main",))
+    assert d == EnqueueNotifyReply(tag="m4rs", label="confer/main", content="roll back")
+
+
+# ─── parser unit ───────────────────────────────────────────────────────────
+
+
+def test_parse_marker_and_token_no_token():
+    marker, token, rest = _parse_marker_and_token("!!!")
+    assert token == ""
+
+
+def test_parse_marker_plain_token_no_marker():
+    marker, token, rest = _parse_marker_and_token("k3qp hello")
+    assert marker is False
+    assert token == "k3qp"
+    assert rest == "hello"
+
+
+def test_parse_marker_redeploy_is_not_marker():
+    marker, token, rest = _parse_marker_and_token("redeploy now")
+    assert marker is False
+    assert token == "redeploy"
+
+
+def test_empty_token_with_single_ask_delivers_full_content():
+    # Leading punctuation produces an empty token; with one ask pending the
+    # whole message is the reply (exercises the token-empty fall-through).
+    d = route_user_message("(yes) do it", (_ask("k3qp"),), (), ("confer/main",))
+    assert d == DeliverAsk(tag="k3qp", content="(yes) do it")

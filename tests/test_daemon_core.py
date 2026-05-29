@@ -10,11 +10,10 @@ from confer.daemon.core import (
     Daemon,
     QueuedMessage,
     _Client,
+    _NotifyThread,
     _PendingAsk,
     _closing_dm_text,
-    _compose_ask_footer,
     _make_disambiguator,
-    _shortest_unique_suffix,
 )
 from confer.daemon.transport import FAILURE_PREFIX
 from confer.protocol import (
@@ -120,7 +119,10 @@ async def test_notify_dispatches_to_transport_and_returns_ok():
     assert responses[1].request_id == "r2"
     assert responses[1].status == "ok"
     assert responses[1].info.startswith("sent at ")
-    daemon._transport.notify.assert_awaited_once_with("hi")
+    # The notify is sent as a tagged thread body "[tag] label: message".
+    body = daemon._transport.notify.await_args.args[0]
+    assert body.endswith("confer/main: hi")
+    assert body.startswith("[") and "] confer/main:" in body
 
 
 async def test_notify_returns_failed_status_when_transport_returns_failure():
@@ -561,8 +563,10 @@ async def test_concurrent_notify_from_two_clients_each_gets_correct_result():
     nr1 = r1_messages[1]
     nr2 = r2_messages[1]
     assert isinstance(nr1, NotifyResult) and isinstance(nr2, NotifyResult)
-    assert nr1.request_id == "n1" and nr1.info == "sent at msg-a"
-    assert nr2.request_id == "n2" and nr2.info == "sent at msg-b"
+    # The daemon now sends a tagged body "[tag] label: message"; the echo
+    # transport reflects that, and each client gets its own correct message.
+    assert nr1.request_id == "n1" and nr1.info.endswith("a: msg-a")
+    assert nr2.request_id == "n2" and nr2.info.endswith("b: msg-b")
 
 
 async def test_status_reflects_concurrent_connected_clients(monkeypatch):
@@ -745,7 +749,9 @@ async def test_serve_removes_stale_socket_file_and_binds(tmp_path):
     await task
 
 
-# ─── ask machinery ────────────────────────────────────────────────────────────
+
+
+# ─── ask machinery (G3 tag model) ───────────────────────────────────────────
 
 
 def _mocked_transport() -> MagicMock:
@@ -755,8 +761,6 @@ def _mocked_transport() -> MagicMock:
 
 
 async def _hello_and_get_writer(daemon: Daemon, label: str = "confer/main") -> MagicMock:
-    """Register a client with a mock writer directly so we can send ask
-    messages bound to that writer without spinning up the full HELLO loop."""
     writer = _writer_mock()
     daemon._clients[label] = _Client(label=label, writer=writer)
     return writer
@@ -783,550 +787,308 @@ async def _register_ask(
     return writer, daemon._pending_asks[request_id]
 
 
-async def test_ask_begin_registers_and_sends_question_dm():
+async def test_ask_begin_assigns_tag_and_sends_tagged_question_dm():
     daemon = _make_daemon()
     writer, pending = await _register_ask(daemon)
-    assert pending.label == "confer/main"
-    assert pending.question == "rebase?"
-    assert pending.on_timeout == "use_best_judgment"
-    daemon._transport.notify.assert_awaited()
+    assert len(pending.tag) == 4
+    assert all(c in "abcdefghijklmnopqrstuvwxyz234567" for c in pending.tag)
     body = daemon._transport.notify.await_args.args[0]
-    assert "rebase?" in body
-    assert "confer/main" in body
-    # Footer omitted when only one ask is pending.
+    assert body == f"[{pending.tag}] confer/main: rebase?"
+    # No footer.
     assert "reply:" not in body
     await daemon._handle_ask_cancel(pending.request_id)
 
 
-async def test_ask_begin_with_multiple_asks_includes_footer():
+async def test_thread_tags_are_unique_across_active_threads():
     daemon = _make_daemon()
     w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
-    daemon._transport.notify.reset_mock()
-    w2 = _writer_mock()
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=w2)
+    w2 = await _hello_and_get_writer(daemon, label="myapp/feat")
     await daemon._handle_ask_begin(
-        AskBegin(
-            request_id="r2",
-            question="merge?",
-            give_up_after_seconds=60,
-            on_timeout="abort",
-        ),
-        w2,
-        "myapp/feat",
+        AskBegin(request_id="r2", question="merge?", give_up_after_seconds=60,
+                 on_timeout="abort"),
+        w2, "myapp/feat",
     )
-    body = daemon._transport.notify.await_args.args[0]
-    assert "reply:" in body
-    assert "1-2" in body
-
+    assert p1.tag != daemon._pending_asks["r2"].tag
     await daemon._handle_ask_cancel("r1")
     await daemon._handle_ask_cancel("r2")
 
 
-async def test_ask_cancel_removes_ask_and_sends_withdrawn_dm():
+async def test_assign_thread_tag_regenerates_on_collision(monkeypatch):
+    daemon = _make_daemon()
+    seq = iter(["aaaa", "aaaa", "bbbb"])
+    monkeypatch.setattr("confer.daemon.core._make_thread_tag", lambda: next(seq))
+    # Pre-occupy "aaaa".
+    daemon._notify_threads["aaaa"] = _NotifyThread(
+        tag="aaaa", label="x", created_at=1.0
+    )
+    tag = daemon._assign_thread_tag()
+    assert tag == "bbbb"
+
+
+async def test_assign_thread_tag_raises_after_100_collisions(monkeypatch):
+    daemon = _make_daemon()
+    monkeypatch.setattr("confer.daemon.core._make_thread_tag", lambda: "aaaa")
+    daemon._notify_threads["aaaa"] = _NotifyThread(
+        tag="aaaa", label="x", created_at=1.0
+    )
+    with pytest.raises(RuntimeError, match="unique thread tag"):
+        daemon._assign_thread_tag()
+
+
+async def test_ask_cancel_sends_withdrawn_dm_with_tag():
     daemon = _make_daemon()
     writer, pending = await _register_ask(daemon)
     daemon._transport.notify.reset_mock()
-
     await daemon._handle_ask_cancel(pending.request_id)
-
     assert pending.request_id not in daemon._pending_asks
     body = daemon._transport.notify.await_args.args[0]
-    assert "Question withdrawn" in body
-    assert "rebase?" in body
+    assert body == f"Re: {pending.tag} — question withdrawn."
 
 
-async def test_ask_cancel_is_idempotent_when_ask_absent():
+async def test_ask_cancel_idempotent_when_absent():
     daemon = _make_daemon()
-    await daemon._handle_ask_cancel("nonexistent")
+    await daemon._handle_ask_cancel("nope")
     daemon._transport.notify.assert_not_awaited()
 
 
-async def test_timeout_fires_sends_ask_timeout_and_closing_dm():
+async def test_timeout_use_best_judgment_sends_directive_and_re_closing_dm():
     daemon = _make_daemon()
-    writer, pending = await _register_ask(
-        daemon, give_up_after_seconds=0  # fire immediately
-    )
+    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
+    tag = pending.tag
     await asyncio.sleep(0.05)
-
     assert pending.request_id not in daemon._pending_asks
     sent = _written_messages(writer)
     assert any(
-        isinstance(m, AskTimeout) and m.outcome == "use_best_judgment"
-        for m in sent
+        isinstance(m, AskTimeout) and m.outcome == "use_best_judgment" for m in sent
     )
-    notify_bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
-    assert any("best judgment" in b for b in notify_bodies)
+    bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
+    assert f"Re: {tag} — time's up; agent will use its best judgment." in bodies
 
 
-async def test_timeout_abort_mode_sends_abort_directive():
+async def test_timeout_abort_sends_abort_directive():
     daemon = _make_daemon()
     writer, pending = await _register_ask(
         daemon, on_timeout="abort", give_up_after_seconds=0
     )
+    tag = pending.tag
     await asyncio.sleep(0.05)
-
     sent = _written_messages(writer)
-    assert any(
-        isinstance(m, AskTimeout) and m.outcome == "abort" for m in sent
-    )
+    assert any(isinstance(m, AskTimeout) and m.outcome == "abort" for m in sent)
     bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
-    assert any("stop and surface state" in b for b in bodies)
+    assert f"Re: {tag} — time's up; agent will stop and surface task state." in bodies
 
 
-async def test_dispatch_user_message_delivers_to_single_pending_ask():
+async def test_dispatch_user_message_single_ask_unprefixed_delivers():
     daemon = _make_daemon()
     writer, pending = await _register_ask(daemon)
-
     await daemon._dispatch_user_message("rebase please")
-
     assert pending.request_id not in daemon._pending_asks
-    sent = _written_messages(writer)
-    reply = next((m for m in sent if isinstance(m, AskReply)), None)
-    assert reply is not None
+    reply = next(m for m in _written_messages(writer) if isinstance(m, AskReply))
     assert reply.content == "rebase please"
 
 
-async def test_dispatch_user_message_bounces_when_no_agents_connected():
-    """Post-2D: bounce only fires when zero clients are connected. With
-    clients connected but no asks, the path is Broadcast, not Bounce."""
+async def test_dispatch_user_message_tag_routes_to_specific_ask():
     daemon = _make_daemon()
-    await daemon._dispatch_user_message("anyone there?")
+    w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
+    w2 = await _hello_and_get_writer(daemon, label="myapp/feat")
+    await daemon._handle_ask_begin(
+        AskBegin(request_id="r2", question="merge?", give_up_after_seconds=60,
+                 on_timeout="use_best_judgment"),
+        w2, "myapp/feat",
+    )
+    p2 = daemon._pending_asks["r2"]
+    await daemon._dispatch_user_message(f"re {p2.tag} go ahead")
+    assert "r2" not in daemon._pending_asks
+    assert "r1" in daemon._pending_asks  # untouched
+    reply = next(m for m in _written_messages(w2) if isinstance(m, AskReply))
+    assert reply.content == "go ahead"
+    await daemon._handle_ask_cancel("r1")
+
+
+async def test_dispatch_user_message_bounces_when_no_agents():
+    daemon = _make_daemon()
+    await daemon._dispatch_user_message("anyone?")
     body = daemon._transport.notify.await_args.args[0]
     assert "No agent is connected" in body
 
 
-async def test_dispatch_user_message_broadcasts_when_no_asks_but_clients_connected():
-    """Rule (4): unprefixed DM with no asks pending but clients connected
-    copies the content into every client's queue with source='broadcast'."""
+async def test_dispatch_user_message_broadcasts_when_no_asks_but_connected():
     daemon = _make_daemon()
     daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
     daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=_writer_mock())
-
-    await daemon._dispatch_user_message("stop, requirements changed")
-
+    await daemon._dispatch_user_message("stop, reqs changed")
     for label in ("confer/main", "myapp/feat"):
-        assert label in daemon._queues
         msgs = list(daemon._queues[label])
         assert len(msgs) == 1
         assert msgs[0].source == "broadcast"
-        assert msgs[0].content == "stop, requirements changed"
-    # No bounce DM should have been sent.
+        assert msgs[0].tag is None
     daemon._transport.notify.assert_not_awaited()
 
 
-async def test_dispatch_user_message_labeled_interjection_queues_to_specific_client():
-    """Rule (1) with no matching ask but matching connected client:
-    enqueue with source='labeled_interjection'."""
+async def test_dispatch_user_message_ambiguous_lists_tags():
     daemon = _make_daemon()
-    daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=_writer_mock())
+    w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
+    w2 = await _hello_and_get_writer(daemon, label="myapp/feat")
+    await daemon._handle_ask_begin(
+        AskBegin(request_id="r2", question="merge?", give_up_after_seconds=60,
+                 on_timeout="use_best_judgment"),
+        w2, "myapp/feat",
+    )
+    daemon._transport.notify.reset_mock()
+    await daemon._dispatch_user_message("hello")
+    body = daemon._transport.notify.await_args.args[0]
+    assert "Multiple questions are waiting" in body
+    assert p1.tag in body
+    assert daemon._pending_asks["r2"].tag in body
+    await daemon._handle_ask_cancel("r1")
+    await daemon._handle_ask_cancel("r2")
 
-    await daemon._dispatch_user_message("confer: also use library X")
 
-    assert "confer/main" in daemon._queues
+async def test_dispatch_user_message_concierge_stub_bounces():
+    daemon = _make_daemon()
+    await daemon._dispatch_user_message(".threads")
+    body = daemon._transport.notify.await_args.args[0]
+    assert "concierge commands aren't available yet" in body
+
+
+# ─── notify-replyable threads ───────────────────────────────────────────────
+
+
+async def test_notify_creates_tagged_replyable_thread():
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon, "confer/main")
+    await daemon._handle_notify(
+        Notify(request_id="n1", message="deploy finished"), writer, "confer/main"
+    )
+    body = daemon._transport.notify.await_args.args[0]
+    # Body is "[tag] label: message"; the tag is now a live notify-thread.
+    assert body.startswith("[")
+    assert "confer/main: deploy finished" in body
+    assert len(daemon._notify_threads) == 1
+    tag = next(iter(daemon._notify_threads))
+    # Reply to the notify tag enqueues an interjection.
+    await daemon._dispatch_user_message(f"re {tag} roll it back")
     msgs = list(daemon._queues["confer/main"])
     assert len(msgs) == 1
-    assert msgs[0].source == "labeled_interjection"
-    assert msgs[0].content == "also use library X"
-    # The other client should NOT have received the message.
-    assert "myapp/feat" not in daemon._queues or not daemon._queues["myapp/feat"]
+    assert msgs[0].source == "notify_reply"
+    assert msgs[0].tag == tag
+    assert msgs[0].content == "roll it back"
 
 
-async def test_check_messages_returns_formatted_queue_and_clears_it():
+async def test_notify_thread_dropped_on_disconnect():
+    daemon = _make_daemon()
+    reader = _reader_with([
+        Hello(request_id="r1", label_preferred="confer/main", pid=1),
+        Notify(request_id="n1", message="done"),
+    ])
+    writer = _writer_mock()
+    await daemon._handle_client(reader, writer)
+    # After the client disconnects (reader EOF), its notify-thread is gone.
+    assert daemon._notify_threads == {}
+
+
+async def test_notify_thread_cap_evicts_oldest_per_label(monkeypatch):
+    daemon = _make_daemon()
+    # Force deterministic, unique tags.
+    seq = iter([f"t{n:03d}"[:4] for n in range(100)])
+    monkeypatch.setattr("confer.daemon.core._make_thread_tag", lambda: next(seq))
+    writer = await _hello_and_get_writer(daemon, "confer/main")
+    # Register one more than the cap.
+    from confer.daemon.core import _NOTIFY_TAGS_PER_LABEL
+    for i in range(_NOTIFY_TAGS_PER_LABEL + 1):
+        await daemon._handle_notify(
+            Notify(request_id=f"n{i}", message=f"m{i}"), writer, "confer/main"
+        )
+    assert len(daemon._notify_threads) == _NOTIFY_TAGS_PER_LABEL
+
+
+# ─── check_messages (G3 formatting) ─────────────────────────────────────────
+
+
+async def test_check_messages_formats_sources_with_tags_and_clears():
     daemon = _make_daemon()
     writer = await _hello_and_get_writer(daemon)
-    daemon._enqueue_message(
-        "confer/main", "first message", source="broadcast", original_question=None
-    )
-    daemon._enqueue_message(
-        "confer/main", "second message",
-        source="labeled_interjection",
-        original_question=None,
-    )
-
-    await daemon._handle_check_messages("req-1", "confer/main", writer)
-
-    sent = _written_messages(writer)
-    result = next(m for m in sent if isinstance(m, CheckMessagesResult))
-    assert result.count == 2
-    assert "first message" in result.formatted
-    assert "second message" in result.formatted
-    assert "broadcast" in result.formatted
-    assert "for-you" in result.formatted
-    # Queue must be cleared after consume-on-read.
+    daemon._enqueue_message("confer/main", "everyone stop", source="broadcast", tag=None)
+    daemon._enqueue_message("confer/main", "roll back", source="notify_reply", tag="m4rs")
+    daemon._enqueue_message("confer/main", "late answer", source="late_reply", tag="k3qp")
+    await daemon._handle_check_messages("req", "confer/main", writer)
+    result = next(m for m in _written_messages(writer) if isinstance(m, CheckMessagesResult))
+    assert result.count == 3
+    assert "[broadcast] everyone stop" in result.formatted
+    assert "[re m4rs] roll back" in result.formatted
+    assert "[re k3qp] late answer" in result.formatted
     assert not daemon._queues["confer/main"]
 
 
-async def test_check_messages_empty_returns_no_messages_directive():
+async def test_check_messages_late_reply_without_tag_uses_fallback_label():
     daemon = _make_daemon()
     writer = await _hello_and_get_writer(daemon)
+    daemon._enqueue_message("confer/main", "x", source="late_reply", tag=None)
+    await daemon._handle_check_messages("req", "confer/main", writer)
+    result = next(m for m in _written_messages(writer) if isinstance(m, CheckMessagesResult))
+    assert "[late-reply] x" in result.formatted
 
-    await daemon._handle_check_messages("req-1", "confer/main", writer)
 
-    sent = _written_messages(writer)
-    result = next(m for m in sent if isinstance(m, CheckMessagesResult))
+async def test_check_messages_empty_directive():
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    await daemon._handle_check_messages("req", "confer/main", writer)
+    result = next(m for m in _written_messages(writer) if isinstance(m, CheckMessagesResult))
     assert result.count == 0
     assert "No new messages" in result.formatted
-
-
-async def test_check_messages_with_late_reply_includes_original_question():
-    daemon = _make_daemon()
-    writer = await _hello_and_get_writer(daemon)
-    daemon._enqueue_message(
-        "confer/main",
-        "yes please rebase",
-        source="late_reply",
-        original_question="rebase or merge?",
-    )
-
-    await daemon._handle_check_messages("req-1", "confer/main", writer)
-
-    sent = _written_messages(writer)
-    result = next(m for m in sent if isinstance(m, CheckMessagesResult))
-    assert "rebase or merge?" in result.formatted
-    assert "late-reply" in result.formatted
 
 
 async def test_check_messages_through_full_dispatch_path():
     daemon = _make_daemon()
     writer = await _hello_and_get_writer(daemon)
-    daemon._enqueue_message(
-        "confer/main", "hello", source="broadcast", original_question=None
-    )
-
-    await daemon._dispatch(CheckMessages(request_id="r-flow"), writer, "confer/main")
-
-    sent = _written_messages(writer)
-    assert any(isinstance(m, CheckMessagesResult) for m in sent)
+    daemon._enqueue_message("confer/main", "hi", source="broadcast", tag=None)
+    await daemon._dispatch(CheckMessages(request_id="r"), writer, "confer/main")
+    assert any(isinstance(m, CheckMessagesResult) for m in _written_messages(writer))
 
 
-async def test_check_messages_requires_hello_first():
-    daemon = _make_daemon()
-    writer = _writer_mock()
-    await daemon._dispatch(
-        CheckMessages(request_id="r1"), writer, client_label=None
-    )
-    sent = _written_messages(writer)
-    assert any(
-        isinstance(m, Error) and m.code == "hello_required" for m in sent
-    )
-
-
-def test_format_queue_for_check_messages_singular_count():
-    from collections import deque
-    from confer.daemon.core import _format_queue_for_check_messages
-    q = deque(
-        [
-            QueuedMessage(
-                timestamp=1.0,
-                content="hello",
-                source="broadcast",
-                original_question=None,
-            )
-        ]
-    )
-    formatted = _format_queue_for_check_messages(q)
-    # singular "1 message" not "1 messages"
-    assert "1 message from the user" in formatted
-    assert "1 messages" not in formatted
-
-
-def test_format_queue_for_check_messages_unknown_source_tag_falls_back():
-    """Defensive: if an unknown source slips into the queue (future expansion
-    or test fixture), the formatter should still render it without crashing."""
-    from collections import deque
-    from confer.daemon.core import _format_queue_for_check_messages
-    q = deque(
-        [
-            QueuedMessage(
-                timestamp=1.0,
-                content="x",
-                source="late_reply",  # known
-                original_question=None,
-            )
-        ]
-    )
-    # Smoke: known source renders the tag.
-    assert "late-reply" in _format_queue_for_check_messages(q)
-
-
-# ─── CLI inject path (phase 3) ────────────────────────────────────────────
-
-
-async def test_inject_delivered_to_single_pending_ask():
-    daemon = _make_daemon()
-    writer_ask, pending = await _register_ask(daemon)
-    cli_writer = _writer_mock()
-
-    await daemon._handle_inject("req-cli", "yes please", cli_writer)
-
-    # CLI got an InjectResult with outcome=delivered.
-    cli_sent = _written_messages(cli_writer)
-    result = next(m for m in cli_sent if isinstance(m, InjectResult))
-    assert result.outcome == "delivered"
-    assert "confer/main" in result.detail
-    # The agent's writer got an AskReply.
-    ask_sent = _written_messages(writer_ask)
-    reply = next((m for m in ask_sent if isinstance(m, AskReply)), None)
-    assert reply is not None
-    assert reply.content == "yes please"
-
-
-async def test_inject_bounced_does_not_send_discord_dm():
-    """CLI inject path with no agents: outcome=bounced, but the daemon must
-    NOT send a Discord feedback DM (CLI user reads the bounce in terminal)."""
-    daemon = _make_daemon()
-    cli_writer = _writer_mock()
-
-    await daemon._handle_inject("req-cli", "anyone there?", cli_writer)
-
-    cli_sent = _written_messages(cli_writer)
-    result = next(m for m in cli_sent if isinstance(m, InjectResult))
-    assert result.outcome == "bounced"
-    assert "No agent is connected" in result.detail
-    daemon._transport.notify.assert_not_awaited()
-
-
-async def test_inject_broadcast_queues_to_all_clients():
-    daemon = _make_daemon()
-    daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=_writer_mock())
-    cli_writer = _writer_mock()
-
-    await daemon._handle_inject("req-cli", "BTW use library X", cli_writer)
-
-    cli_sent = _written_messages(cli_writer)
-    result = next(m for m in cli_sent if isinstance(m, InjectResult))
-    assert result.outcome == "broadcast"
-    assert "2 connected agent" in result.detail
-    for label in ("confer/main", "myapp/feat"):
-        msgs = list(daemon._queues[label])
-        assert len(msgs) == 1
-        assert msgs[0].source == "broadcast"
-
-
-async def test_inject_queued_labeled_routes_to_specific_client():
-    daemon = _make_daemon()
-    daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=_writer_mock())
-    cli_writer = _writer_mock()
-
-    await daemon._handle_inject("req-cli", "confer: BTW use X", cli_writer)
-
-    cli_sent = _written_messages(cli_writer)
-    result = next(m for m in cli_sent if isinstance(m, InjectResult))
-    assert result.outcome == "queued_labeled"
-    assert "confer/main" in result.detail
-
-
-async def test_inject_ambiguous_returns_outcome_without_discord_dm():
-    daemon = _make_daemon()
-    w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
-    w2 = _writer_mock()
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=w2)
-    await daemon._handle_ask_begin(
-        AskBegin(
-            request_id="r2", question="merge?",
-            give_up_after_seconds=60, on_timeout="use_best_judgment",
-        ),
-        w2, "myapp/feat",
-    )
-    daemon._transport.notify.reset_mock()
-    cli_writer = _writer_mock()
-
-    await daemon._handle_inject("req-cli", "hello", cli_writer)
-
-    cli_sent = _written_messages(cli_writer)
-    result = next(m for m in cli_sent if isinstance(m, InjectResult))
-    assert result.outcome == "ambiguous"
-    assert "Multiple asks waiting" in result.detail
-    daemon._transport.notify.assert_not_awaited()
-
-    await daemon._handle_ask_cancel("r1")
-    await daemon._handle_ask_cancel("r2")
-
-
-async def test_list_asks_empty():
-    daemon = _make_daemon()
-    cli_writer = _writer_mock()
-    await daemon._handle_list_asks("r1", cli_writer)
-    sent = _written_messages(cli_writer)
-    result = next(m for m in sent if isinstance(m, ListAsksResult))
-    assert result.count == 0
-    assert "No pending asks" in result.formatted
-
-
-async def test_list_asks_returns_numbered_list_newest_first():
-    daemon = _make_daemon()
-    w1, p1 = await _register_ask(
-        daemon, request_id="r1", label="confer/main", question="rebase?",
-    )
-    w2 = _writer_mock()
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=w2)
-    # Second ask is newer (started_at is monotonic, second registered later).
-    await daemon._handle_ask_begin(
-        AskBegin(
-            request_id="r2", question="drop table?",
-            give_up_after_seconds=60, on_timeout="abort",
-        ),
-        w2, "myapp/feat",
-    )
-    cli_writer = _writer_mock()
-
-    await daemon._handle_list_asks("req-cli", cli_writer)
-
-    sent = _written_messages(cli_writer)
-    result = next(m for m in sent if isinstance(m, ListAsksResult))
-    assert result.count == 2
-    # Newest-first: r2 (myapp/feat) before r1 (confer/main).
-    lines = result.formatted.splitlines()
-    feat_idx = next(i for i, line in enumerate(lines) if "myapp/feat" in line)
-    main_idx = next(i for i, line in enumerate(lines) if "confer/main" in line)
-    assert feat_idx < main_idx
-
-    await daemon._handle_ask_cancel("r1")
-    await daemon._handle_ask_cancel("r2")
-
-
-async def test_inject_message_is_hello_exempt():
-    """CLI messages don't HELLO. The daemon must process INJECT from an
-    unregistered (no client_label) writer without firing hello_required."""
-    daemon = _make_daemon()
-    writer = _writer_mock()
-    await daemon._dispatch(
-        Inject(request_id="r1", content="hi"), writer, client_label=None
-    )
-    sent = _written_messages(writer)
-    # No hello_required Error; we got an InjectResult instead.
-    assert not any(
-        isinstance(m, Error) and m.code == "hello_required" for m in sent
-    )
-    assert any(isinstance(m, InjectResult) for m in sent)
-
-
-async def test_list_asks_message_is_hello_exempt():
-    daemon = _make_daemon()
-    writer = _writer_mock()
-    await daemon._dispatch(
-        ListAsks(request_id="r1"), writer, client_label=None
-    )
-    sent = _written_messages(writer)
-    assert not any(
-        isinstance(m, Error) and m.code == "hello_required" for m in sent
-    )
-    assert any(isinstance(m, ListAsksResult) for m in sent)
-
-
-def test_format_pending_asks_for_list_empty():
-    from confer.daemon.core import _format_pending_asks_for_list
-    assert "No pending asks" in _format_pending_asks_for_list([])
-
-
-def test_format_pending_asks_for_list_with_entries():
-    from confer.daemon.core import _format_pending_asks_for_list
-    asks = [
-        _PendingAsk(
-            request_id="r1", label="confer/main", question="rebase?",
-            on_timeout="use_best_judgment", give_up_after_seconds=60,
-            started_at=2.0, writer=MagicMock(),
-        ),
-        _PendingAsk(
-            request_id="r2", label="myapp/feat", question="merge?",
-            on_timeout="abort", give_up_after_seconds=60,
-            started_at=1.0, writer=MagicMock(),
-        ),
-    ]
-    formatted = _format_pending_asks_for_list(asks)
-    assert "2 pending ask" in formatted
-    assert "rebase?" in formatted
-    assert "merge?" in formatted
-
-
-async def test_dispatch_user_message_ambiguous_sends_disambiguation_dm():
-    daemon = _make_daemon()
-    w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
-    w2 = _writer_mock()
-    daemon._clients["myapp/feat"] = _Client(label="myapp/feat", writer=w2)
-    await daemon._handle_ask_begin(
-        AskBegin(
-            request_id="r2",
-            question="merge?",
-            give_up_after_seconds=60,
-            on_timeout="use_best_judgment",
-        ),
-        w2,
-        "myapp/feat",
-    )
-    daemon._transport.notify.reset_mock()
-
-    await daemon._dispatch_user_message("hello")
-
-    body = daemon._transport.notify.await_args.args[0]
-    assert "Multiple asks waiting" in body
-    assert "confer/main" in body
-    assert "myapp/feat" in body
-
-    await daemon._handle_ask_cancel("r1")
-    await daemon._handle_ask_cancel("r2")
-
-
-async def test_deliver_reply_enqueues_late_when_ask_already_gone():
-    """Race: snapshot showed a pending ask, but by the time _deliver_reply
-    is called, the ask is gone. The content goes to the late_reply queue."""
-    daemon = _make_daemon()
-    await daemon._deliver_reply("confer/main", "late reply content")
-
-    assert "confer/main" in daemon._queues
-    queued = list(daemon._queues["confer/main"])
-    assert len(queued) == 1
-    assert queued[0].content == "late reply content"
-    assert queued[0].source == "late_reply"
-
-
-async def test_late_reply_queue_evicts_oldest_when_full(caplog):
+async def test_queue_evicts_oldest_when_full(caplog):
     import logging
     daemon = _make_daemon()
     with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
         for i in range(101):
-            daemon._enqueue_late_reply(
-                "confer/main", f"msg-{i}", original_question=None
-            )
-    queue = daemon._queues["confer/main"]
-    assert len(queue) == 100
-    assert queue[0].content == "msg-1"  # msg-0 evicted
+            daemon._enqueue_message("confer/main", f"m{i}", source="broadcast", tag=None)
+    q = daemon._queues["confer/main"]
+    assert len(q) == 100
+    assert q[0].content == "m1"
     assert any("queue full" in r.getMessage() for r in caplog.records)
 
 
-async def test_client_disconnect_drops_pending_asks_and_sends_lost_contact_dm():
+# ─── orphan drop on disconnect ──────────────────────────────────────────────
+
+
+async def test_disconnect_drops_asks_with_lost_contact_dm():
     daemon = _make_daemon()
     writer, pending = await _register_ask(daemon)
+    tag = pending.tag
     daemon._transport.notify.reset_mock()
-
     await daemon._drop_asks_for_writer(writer, "confer/main")
-
     assert pending.request_id not in daemon._pending_asks
     body = daemon._transport.notify.await_args.args[0]
-    assert "Lost contact" in body
-    assert "rebase?" in body
+    assert body == f"Re: {tag} — lost contact with the agent that asked."
 
 
-async def test_re_ping_loop_sends_reminder_when_deadline_far():
-    # give_up must exceed the 60s skip-near-deadline window for re-pings to fire.
+# ─── re-ping ─────────────────────────────────────────────────────────────────
+
+
+async def test_re_ping_uses_re_tag_anchor():
     daemon = Daemon(transport=_mocked_transport(), re_ping_every_seconds=0.05)
     writer, pending = await _register_ask(daemon, give_up_after_seconds=120)
     daemon._transport.notify.reset_mock()
     await asyncio.sleep(0.15)
-
     bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
-    assert any("Still waiting" in b for b in bodies)
-
+    assert any(b.startswith(f"Re: {pending.tag} — still waiting") for b in bodies)
     await daemon._handle_ask_cancel(pending.request_id)
 
 
-async def test_re_ping_loop_send_failure_is_non_fatal(caplog):
+async def test_re_ping_send_failure_non_fatal(caplog):
     import logging
     daemon = Daemon(transport=_mocked_transport(), re_ping_every_seconds=0.05)
-    daemon._transport.notify = AsyncMock(side_effect=RuntimeError("transport boom"))
+    daemon._transport.notify = AsyncMock(side_effect=RuntimeError("boom"))
     writer, pending = await _register_ask(daemon, give_up_after_seconds=120)
     with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
         await asyncio.sleep(0.15)
@@ -1335,178 +1097,11 @@ async def test_re_ping_loop_send_failure_is_non_fatal(caplog):
     await daemon._handle_ask_cancel(pending.request_id)
 
 
-async def test_re_ping_loop_returns_when_within_deadline_window():
-    """With give_up=0.1 and cadence=0.05, the second re-ping at ~0.10 lands
-    within 60s of the deadline (at 0.1) so the loop exits cleanly."""
+async def test_re_ping_skips_near_deadline():
     daemon = Daemon(transport=_mocked_transport(), re_ping_every_seconds=0.05)
     writer, pending = await _register_ask(daemon, give_up_after_seconds=0.1)
     await asyncio.sleep(0.2)
     assert pending.request_id not in daemon._pending_asks
-
-
-def test_compose_ask_footer_empty_with_single_ask():
-    ask = _PendingAsk(
-        request_id="r1",
-        label="confer/main",
-        question="?",
-        on_timeout="use_best_judgment",
-        give_up_after_seconds=60,
-        started_at=1.0,
-        writer=MagicMock(),
-    )
-    assert _compose_ask_footer([ask]) == ""
-
-
-def test_compose_ask_footer_uses_short_suffix_when_unique():
-    asks = [
-        _PendingAsk(
-            request_id=f"r{i}",
-            label=label,
-            question="?",
-            on_timeout="use_best_judgment",
-            give_up_after_seconds=60,
-            started_at=float(i),
-            writer=MagicMock(),
-        )
-        for i, label in enumerate(["confer/main", "myapp/feat-ask"])
-    ]
-    footer = _compose_ask_footer(asks)
-    assert "main" in footer
-    assert "feat-ask" in footer
-
-
-def test_compose_ask_footer_falls_back_to_full_label_on_collision():
-    asks = [
-        _PendingAsk(
-            request_id=f"r{i}",
-            label=label,
-            question="?",
-            on_timeout="use_best_judgment",
-            give_up_after_seconds=60,
-            started_at=float(i),
-            writer=MagicMock(),
-        )
-        for i, label in enumerate(["confer/main", "myapp/main"])
-    ]
-    footer = _compose_ask_footer(asks)
-    # Both suffixes "main" — fall back to full labels.
-    assert "confer/main" in footer
-    assert "myapp/main" in footer
-
-
-def test_closing_dm_text_for_all_reasons():
-    assert "best judgment" in _closing_dm_text("use_best_judgment", "Q")
-    assert "stop and surface" in _closing_dm_text("abort", "Q")
-    assert "withdrawn" in _closing_dm_text("withdrawn", "Q")
-    assert "Lost contact" in _closing_dm_text("lost_contact", "Q")
-
-
-def test_shortest_unique_suffix_picks_after_slash_when_unique():
-    result = _shortest_unique_suffix(["confer/main", "myapp/feat"])
-    assert result == {"confer/main": "main", "myapp/feat": "feat"}
-
-
-def test_shortest_unique_suffix_falls_back_to_full_label_on_collision():
-    result = _shortest_unique_suffix(["confer/main", "myapp/main"])
-    assert result == {"confer/main": "confer/main", "myapp/main": "myapp/main"}
-
-
-async def test_dispatch_handles_ask_begin_through_full_message_path():
-    daemon = _make_daemon()
-    writer = await _hello_and_get_writer(daemon)
-    msg = AskBegin(
-        request_id="r-flow",
-        question="q?",
-        give_up_after_seconds=60,
-        on_timeout="use_best_judgment",
-    )
-    await daemon._dispatch(msg, writer, "confer/main")
-    assert "r-flow" in daemon._pending_asks
-    await daemon._handle_ask_cancel("r-flow")
-
-
-async def test_dispatch_handles_ask_cancel_through_full_message_path():
-    daemon = _make_daemon()
-    writer, pending = await _register_ask(daemon)
-    await daemon._dispatch(
-        AskCancel(request_id=pending.request_id), writer, "confer/main"
-    )
-    assert pending.request_id not in daemon._pending_asks
-
-
-async def test_ask_begin_requires_hello_first():
-    daemon = _make_daemon()
-    writer = _writer_mock()
-    await daemon._dispatch(
-        AskBegin(
-            request_id="r1",
-            question="q?",
-            give_up_after_seconds=60,
-            on_timeout="use_best_judgment",
-        ),
-        writer,
-        client_label=None,
-    )
-    sent = _written_messages(writer)
-    assert any(
-        isinstance(m, Error) and m.code == "hello_required" for m in sent
-    )
-
-
-async def test_send_dm_best_effort_logs_on_exception(caplog):
-    import logging
-    daemon = _make_daemon()
-    daemon._transport.notify = AsyncMock(side_effect=RuntimeError("boom"))
-    with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
-        await daemon._send_dm_best_effort("hello")
-    assert any("daemon DM send raised" in r.getMessage() for r in caplog.records)
-
-
-async def test_send_dm_best_effort_logs_on_failure_sentinel(caplog):
-    import logging
-    daemon = _make_daemon()
-    daemon._transport.notify = AsyncMock(
-        return_value=f"{FAILURE_PREFIX}some failure>"
-    )
-    with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
-        await daemon._send_dm_best_effort("hello")
-    assert any("daemon DM send failed" in r.getMessage() for r in caplog.records)
-
-
-async def test_cancel_ask_tasks_handles_none_and_done_tasks():
-    daemon = _make_daemon()
-    pending = _PendingAsk(
-        request_id="r1",
-        label="x",
-        question="?",
-        on_timeout="use_best_judgment",
-        give_up_after_seconds=60,
-        started_at=time.monotonic(),
-        writer=_writer_mock(),
-        re_ping_task=None,
-        timeout_task=None,
-    )
-    await daemon._cancel_ask_tasks(pending)  # must not raise
-
-    async def already_done():
-        return None
-    done_task = asyncio.create_task(already_done())
-    await done_task
-    pending.timeout_task = done_task
-    await daemon._cancel_ask_tasks(pending)  # done task: no cancel, no await
-
-
-async def test_timeout_loop_no_op_when_already_resolved():
-    """If the ask was resolved before timeout fires (race), the timeout
-    handler must no-op."""
-    daemon = _make_daemon()
-    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
-    daemon._pending_asks.pop(pending.request_id)
-    if pending.re_ping_task is not None:
-        pending.re_ping_task.cancel()
-    await asyncio.sleep(0.05)
-    sent = _written_messages(writer)
-    assert not any(isinstance(m, AskTimeout) for m in sent)
 
 
 async def test_re_ping_loop_cancelled_returns_cleanly():
@@ -1527,44 +1122,259 @@ async def test_timeout_loop_cancelled_returns_cleanly():
     await daemon._handle_ask_cancel(pending.request_id)
 
 
-async def test_deliver_reply_enqueues_late_when_label_does_not_match_any_pending_ask():
-    """When _deliver_reply gets a label that has no matching pending ask
-    even though pending_asks is non-empty (race with concurrent resolution
-    or routing inconsistency), the content goes to the late_reply queue."""
+async def test_timeout_loop_no_op_when_already_resolved():
     daemon = _make_daemon()
-    # Register an ask for label A.
-    writer, pending = await _register_ask(daemon, label="confer/main")
-    # Call _deliver_reply for a DIFFERENT label that no pending ask has.
-    await daemon._deliver_reply("myapp/other", "stray content")
-
-    assert "myapp/other" in daemon._queues
-    queued = list(daemon._queues["myapp/other"])
-    assert queued[0].content == "stray content"
-
-    await daemon._handle_ask_cancel(pending.request_id)
+    writer, pending = await _register_ask(daemon, give_up_after_seconds=0)
+    daemon._pending_asks.pop(pending.request_id)
+    if pending.re_ping_task is not None:
+        pending.re_ping_task.cancel()
+    await asyncio.sleep(0.05)
+    assert not any(isinstance(m, AskTimeout) for m in _written_messages(writer))
 
 
 async def test_timeout_loop_handles_none_re_ping_task():
-    """Defensive path: if a timeout fires while re_ping_task is None (which
-    shouldn't happen via the normal _handle_ask_begin path, but is possible
-    if construction is split across code paths), the timeout still resolves
-    cleanly."""
     daemon = _make_daemon()
     writer = await _hello_and_get_writer(daemon)
-    # Construct a pending ask manually with re_ping_task=None.
     pending = _PendingAsk(
-        request_id="r-manual",
-        label="confer/main",
-        question="q?",
-        on_timeout="use_best_judgment",
-        give_up_after_seconds=0,
-        started_at=time.monotonic(),
-        writer=writer,
-        re_ping_task=None,
+        request_id="r-manual", label="confer/main", question="q?",
+        on_timeout="use_best_judgment", give_up_after_seconds=0,
+        started_at=time.monotonic(), writer=writer, tag="zzzz", re_ping_task=None,
     )
     daemon._pending_asks["r-manual"] = pending
-    # Run timeout_loop directly — must not raise on None re_ping_task.
     await daemon._timeout_loop(pending)
     assert "r-manual" not in daemon._pending_asks
+    assert any(isinstance(m, AskTimeout) for m in _written_messages(writer))
+
+
+async def test_cancel_ask_tasks_handles_none_and_done():
+    daemon = _make_daemon()
+    pending = _PendingAsk(
+        request_id="r1", label="x", question="?", on_timeout="use_best_judgment",
+        give_up_after_seconds=60, started_at=time.monotonic(), writer=_writer_mock(),
+        tag="zzzz", re_ping_task=None, timeout_task=None,
+    )
+    await daemon._cancel_ask_tasks(pending)
+
+    async def done():
+        return None
+    t = asyncio.create_task(done())
+    await t
+    pending.timeout_task = t
+    await daemon._cancel_ask_tasks(pending)
+
+
+# ─── deliver-by-tag race ────────────────────────────────────────────────────
+
+
+async def test_deliver_by_tag_enqueues_late_reply_when_ask_gone():
+    daemon = _make_daemon()
+    await daemon._deliver_reply_by_tag("k3qp", "late content", "confer/main")
+    q = list(daemon._queues["confer/main"])
+    assert len(q) == 1
+    assert q[0].source == "late_reply"
+    assert q[0].tag == "k3qp"
+    assert q[0].content == "late content"
+
+
+# ─── routing through _dispatch (HELLO-exempt CLI + protocol path) ───────────
+
+
+async def test_ask_begin_requires_hello():
+    daemon = _make_daemon()
+    writer = _writer_mock()
+    await daemon._dispatch(
+        AskBegin(request_id="r1", question="q?", give_up_after_seconds=60,
+                 on_timeout="use_best_judgment"),
+        writer, client_label=None,
+    )
+    assert any(
+        isinstance(m, Error) and m.code == "hello_required"
+        for m in _written_messages(writer)
+    )
+
+
+async def test_ask_cancel_through_dispatch():
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon)
+    await daemon._dispatch(AskCancel(request_id=pending.request_id), writer, "confer/main")
+    assert pending.request_id not in daemon._pending_asks
+
+
+async def test_ask_begin_through_dispatch():
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    await daemon._dispatch(
+        AskBegin(request_id="rf", question="q?", give_up_after_seconds=60,
+                 on_timeout="use_best_judgment"),
+        writer, "confer/main",
+    )
+    assert "rf" in daemon._pending_asks
+    await daemon._handle_ask_cancel("rf")
+
+
+# ─── CLI inject path (F-A: closing DM on CLI-resolve) ───────────────────────
+
+
+async def test_inject_delivered_sends_cli_answered_closing_dm():
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon)
+    tag = pending.tag
+    cli_writer = _writer_mock()
+    await daemon._handle_inject("cli-r", "yes go", cli_writer)
+    # Agent got the reply.
+    assert any(isinstance(m, AskReply) for m in _written_messages(writer))
+    # CLI got the InjectResult.
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, InjectResult))
+    assert result.outcome == "delivered"
+    # And a Discord closing DM was sent (F-A fix).
+    bodies = [c.args[0] for c in daemon._transport.notify.await_args_list]
+    assert f"Re: {tag} — answered from the laptop." in bodies
+
+
+async def test_inject_bounced_no_discord_dm():
+    daemon = _make_daemon()
+    cli_writer = _writer_mock()
+    await daemon._handle_inject("cli-r", "anyone?", cli_writer)
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, InjectResult))
+    assert result.outcome == "bounced"
+    daemon._transport.notify.assert_not_awaited()
+
+
+async def test_inject_broadcast():
+    daemon = _make_daemon()
+    daemon._clients["confer/main"] = _Client(label="confer/main", writer=_writer_mock())
+    cli_writer = _writer_mock()
+    await daemon._handle_inject("cli-r", "everyone stop", cli_writer)
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, InjectResult))
+    assert result.outcome == "broadcast"
+    assert list(daemon._queues["confer/main"])[0].source == "broadcast"
+
+
+async def test_inject_notify_reply_outcome():
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon, "confer/main")
+    await daemon._handle_notify(
+        Notify(request_id="n1", message="done"), writer, "confer/main"
+    )
+    tag = next(iter(daemon._notify_threads))
+    cli_writer = _writer_mock()
+    await daemon._handle_inject("cli-r", f"re {tag} roll back", cli_writer)
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, InjectResult))
+    assert result.outcome == "queued_notify_reply"
+
+
+async def test_inject_concierge_outcome():
+    daemon = _make_daemon()
+    cli_writer = _writer_mock()
+    await daemon._handle_inject("cli-r", ".threads", cli_writer)
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, InjectResult))
+    assert result.outcome == "concierge"
+
+
+async def test_inject_ambiguous_outcome():
+    daemon = _make_daemon()
+    w1, p1 = await _register_ask(daemon, request_id="r1", label="confer/main")
+    w2 = await _hello_and_get_writer(daemon, label="myapp/feat")
+    await daemon._handle_ask_begin(
+        AskBegin(request_id="r2", question="merge?", give_up_after_seconds=60,
+                 on_timeout="use_best_judgment"),
+        w2, "myapp/feat",
+    )
+    cli_writer = _writer_mock()
+    await daemon._handle_inject("cli-r", "hello", cli_writer)
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, InjectResult))
+    assert result.outcome == "ambiguous"
+    await daemon._handle_ask_cancel("r1")
+    await daemon._handle_ask_cancel("r2")
+
+
+async def test_inject_through_dispatch_hello_exempt():
+    daemon = _make_daemon()
+    writer = _writer_mock()
+    await daemon._dispatch(Inject(request_id="r1", content="hi"), writer, None)
     sent = _written_messages(writer)
-    assert any(isinstance(m, AskTimeout) for m in sent)
+    assert not any(isinstance(m, Error) and m.code == "hello_required" for m in sent)
+    assert any(isinstance(m, InjectResult) for m in sent)
+
+
+# ─── confer list ─────────────────────────────────────────────────────────────
+
+
+async def test_list_asks_empty():
+    daemon = _make_daemon()
+    writer = _writer_mock()
+    await daemon._handle_list_asks("r1", writer)
+    result = next(m for m in _written_messages(writer) if isinstance(m, ListAsksResult))
+    assert result.count == 0
+    assert "No pending asks" in result.formatted
+
+
+async def test_list_asks_shows_tags_newest_first():
+    daemon = _make_daemon()
+    w1, p1 = await _register_ask(daemon, request_id="r1", question="rebase?",
+                                 label="confer/main")
+    w2 = await _hello_and_get_writer(daemon, label="myapp/feat")
+    await daemon._handle_ask_begin(
+        AskBegin(request_id="r2", question="drop table?", give_up_after_seconds=60,
+                 on_timeout="abort"),
+        w2, "myapp/feat",
+    )
+    p2 = daemon._pending_asks["r2"]
+    cli_writer = _writer_mock()
+    await daemon._handle_list_asks("r", cli_writer)
+    result = next(m for m in _written_messages(cli_writer) if isinstance(m, ListAsksResult))
+    assert result.count == 2
+    assert p1.tag in result.formatted
+    assert p2.tag in result.formatted
+    lines = result.formatted.splitlines()
+    feat_idx = next(i for i, ln in enumerate(lines) if "myapp/feat" in ln)
+    main_idx = next(i for i, ln in enumerate(lines) if "confer/main" in ln)
+    assert feat_idx < main_idx
+    await daemon._handle_ask_cancel("r1")
+    await daemon._handle_ask_cancel("r2")
+
+
+async def test_list_asks_through_dispatch_hello_exempt():
+    daemon = _make_daemon()
+    writer = _writer_mock()
+    await daemon._dispatch(ListAsks(request_id="r1"), writer, None)
+    sent = _written_messages(writer)
+    assert not any(isinstance(m, Error) and m.code == "hello_required" for m in sent)
+    assert any(isinstance(m, ListAsksResult) for m in sent)
+
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+async def test_send_dm_best_effort_logs_on_exception(caplog):
+    import logging
+    daemon = _make_daemon()
+    daemon._transport.notify = AsyncMock(side_effect=RuntimeError("boom"))
+    with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
+        await daemon._send_dm_best_effort("hi")
+    assert any("daemon DM send raised" in r.getMessage() for r in caplog.records)
+
+
+async def test_send_dm_best_effort_logs_on_failure_sentinel(caplog):
+    import logging
+    daemon = _make_daemon()
+    daemon._transport.notify = AsyncMock(return_value=f"{FAILURE_PREFIX}x>")
+    with caplog.at_level(logging.WARNING, logger="confer.daemon.core"):
+        await daemon._send_dm_best_effort("hi")
+    assert any("daemon DM send failed" in r.getMessage() for r in caplog.records)
+
+
+def test_closing_dm_text_all_reasons():
+    assert "best judgment" in _closing_dm_text("use_best_judgment", "k3qp")
+    assert "surface task state" in _closing_dm_text("abort", "k3qp")
+    assert "withdrawn" in _closing_dm_text("withdrawn", "k3qp")
+    assert "lost contact" in _closing_dm_text("lost_contact", "k3qp")
+    assert "answered from the laptop" in _closing_dm_text("cli_answered", "k3qp")
+    assert "k3qp" in _closing_dm_text("use_best_judgment", "k3qp")
+
+
+def test_make_thread_tag_is_4_base32_chars():
+    from confer.daemon.core import _make_thread_tag
+    tag = _make_thread_tag()
+    assert len(tag) == 4
+    assert all(c in "abcdefghijklmnopqrstuvwxyz234567" for c in tag)

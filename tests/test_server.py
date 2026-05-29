@@ -203,5 +203,12 @@ async def test_server_instructions_describe_check_messages_tool():
     instructions = server.mcp.instructions
     assert "check_messages" in instructions
     assert "[broadcast]" in instructions
-    assert "[for-you]" in instructions
+    assert "[re <tag>]" in instructions
     assert "[late-reply]" in instructions
+
+
+async def test_server_instructions_document_terse_reply_vocabulary():
+    instructions = server.mcp.instructions
+    assert "TERSE" in instructions
+    assert '"stop"' in instructions
+    assert '"bj"' in instructions or '"go"' in instructions

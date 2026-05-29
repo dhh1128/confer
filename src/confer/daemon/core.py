@@ -3,21 +3,25 @@ import errno
 import hashlib
 import logging
 import os
+import secrets
 import signal
 import time
 from collections import deque
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from confer.daemon.routing import (
+    CONCIERGE_STUB,
     Ambiguous,
+    AskThread,
     Bounce,
     Broadcast,
-    Deliver,
-    EnqueueLabeled,
-    PendingAsk as RoutingPendingAsk,
+    Concierge,
+    DeliverAsk,
+    EnqueueNotifyReply,
+    NotifyThread,
     route_user_message,
 )
 from confer.daemon.transport import FAILURE_PREFIX, DiscordTransport
@@ -51,105 +55,71 @@ log = logging.getLogger(__name__)
 
 _SKIP_REPING_NEAR_DEADLINE = 60.0  # seconds
 _QUEUE_PER_LABEL_LIMIT = 100
+_NOTIFY_TAGS_PER_LABEL = 20  # cap on live replyable notify-threads per agent
+_TAG_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"  # base32, matches node ids
+_TAG_LEN = 4
 
 
-def _closing_dm_text(reason: str, question: str) -> str:
-    """Render the closing DM body for an ask resolving without a user reply.
+def _make_thread_tag() -> str:
+    """Random 4-char base32 thread tag (Thread Tag Model, tgq4n7px)."""
+    return "".join(secrets.choice(_TAG_ALPHABET) for _ in range(_TAG_LEN))
 
-    Reasons:
-      - "use_best_judgment" / "abort": timeout dispositions
-      - "withdrawn": ASK_CANCEL path
-      - "lost_contact": orphan drop on MCP-server disconnect
-    """
+
+def _closing_dm_text(reason: str, tag: str) -> str:
+    """Render the closing DM body for an ask resolving without a Discord-typed
+    reply, anchored with the thread tag (Threaded DM Conventions, dm5kqv7n).
+
+    Reasons: "use_best_judgment" / "abort" (timeout dispositions), "withdrawn"
+    (ASK_CANCEL), "lost_contact" (orphan drop on disconnect), "cli_answered"
+    (resolved via the confer CLI — F-A fix, pkn7mvq4)."""
     templates = {
         "use_best_judgment": (
-            "**Time's up — agent will use its best judgment on:** *{q}*"
+            "Re: {tag} — time's up; agent will use its best judgment."
         ),
-        "abort": (
-            "**Time's up — agent will stop and surface state for:** *{q}*"
-        ),
-        "withdrawn": "**Question withdrawn:** *{q}*",
-        "lost_contact": "**Lost contact with the agent that asked:** *{q}*",
+        "abort": "Re: {tag} — time's up; agent will stop and surface task state.",
+        "withdrawn": "Re: {tag} — question withdrawn.",
+        "lost_contact": "Re: {tag} — lost contact with the agent that asked.",
+        "cli_answered": "Re: {tag} — answered from the laptop.",
     }
-    return templates[reason].format(q=question)
-
-
-def _shortest_unique_suffix(labels: list[str]) -> dict[str, str]:
-    """For each label, pick a short hint string suitable for the routing
-    footer. Strategy: take the segment after the last '/' if it's unique
-    across all labels; otherwise use the full label."""
-    after_slash = {label: label.rsplit("/", 1)[-1] for label in labels}
-    seen: dict[str, int] = {}
-    for hint in after_slash.values():
-        seen[hint] = seen.get(hint, 0) + 1
-    return {
-        label: hint if seen[hint] == 1 else label
-        for label, hint in after_slash.items()
-    }
-
-
-def _compose_ask_footer(asks_newest_first: list["_PendingAsk"]) -> str:
-    """Format the routing footer the bot appends to ask DMs.
-
-    Empty string when 1 or fewer asks are pending — the body alone is enough,
-    per Reply Routing Footer (xqp4nv7m)."""
-    n = len(asks_newest_first)
-    if n <= 1:
-        return ""
-    hints = _shortest_unique_suffix([a.label for a in asks_newest_first])
-    label_parts = ", ".join(hints[a.label] for a in asks_newest_first)
-    return (
-        f"\n(reply: {label_parts}, 1-{n}, "
-        f"or just answer if I'm the only one waiting)"
-    )
+    return templates[reason].format(tag=tag)
 
 
 @dataclass(frozen=True)
 class QueuedMessage:
     timestamp: float
     content: str
-    source: Literal["late_reply", "labeled_interjection", "broadcast"]
-    original_question: str | None
-
-
-_SOURCE_TAGS = {
-    "late_reply": "late-reply",
-    "labeled_interjection": "for-you",
-    "broadcast": "broadcast",
-}
-
-
-def _format_pending_asks_for_list(asks) -> str:
-    """Render pending asks (newest-first) as a numbered list suitable for
-    the CLI `confer list` output. The numeric prefix lines up with
-    7kxpvnqj rule (2): `confer answer "N your text"` routes to the Nth
-    ask."""
-    if not asks:
-        return "No pending asks."
-    lines = [f"{len(asks)} pending ask(s) (newest first):", ""]
-    for i, ask in enumerate(asks, start=1):
-        lines.append(f"  {i}. [{ask.label}] {ask.question}")
-    return "\n".join(lines)
+    source: Literal["late_reply", "notify_reply", "broadcast"]
+    tag: str | None  # thread tag this entry concerns (None for broadcast)
 
 
 def _format_queue_for_check_messages(queue) -> str:
-    """Render a deque of QueuedMessage as a natural-language string for the
-    agent (per Check Messages Inbox Model, cm7vnpqx). Empty queues return a
-    short directive so the agent's reasoning has something concrete to act
-    on."""
+    """Render a deque of QueuedMessage as natural-language prose for the agent
+    (Check Messages Inbox Model, cm7vnpqx). Empty queues return a short
+    directive. Each entry is anchored so the agent can correlate it with the
+    thread it concerns."""
     if not queue:
         return "No new messages from the user."
-    lines: list[str] = []
     count = len(queue)
-    header = f"{count} message{'s' if count != 1 else ''} from the user:"
-    lines.append(header)
-    lines.append("")
+    lines = [f"{count} message{'s' if count != 1 else ''} from the user:", ""]
     for entry in queue:
-        tag = _SOURCE_TAGS.get(entry.source, entry.source)
-        suffix = ""
-        if entry.source == "late_reply" and entry.original_question:
-            suffix = f" (was answering: {entry.original_question!r})"
-        lines.append(f"[{tag}] {entry.content}{suffix}")
+        if entry.source == "broadcast":
+            lines.append(f"[broadcast] {entry.content}")
+        elif entry.source == "notify_reply":
+            lines.append(f"[re {entry.tag}] {entry.content}")
+        else:  # late_reply
+            anchor = f"re {entry.tag}" if entry.tag else "late-reply"
+            lines.append(f"[{anchor}] {entry.content}")
+    return "\n".join(lines)
+
+
+def _format_pending_asks_for_list(asks) -> str:
+    """Render pending asks (newest-first) for the CLI `confer list` output,
+    leading with each ask's tag so the user can `confer answer "re <tag> ..."`."""
+    if not asks:
+        return "No pending asks."
+    lines = [f"{len(asks)} pending ask(s) (newest first):", ""]
+    for ask in asks:
+        lines.append(f"  [{ask.tag}] {ask.label}: {ask.question}")
     return "\n".join(lines)
 
 
@@ -168,8 +138,16 @@ class _PendingAsk:
     give_up_after_seconds: int
     started_at: float  # monotonic
     writer: asyncio.StreamWriter
+    tag: str = ""
     re_ping_task: asyncio.Task | None = None
     timeout_task: asyncio.Task | None = None
+
+
+@dataclass
+class _NotifyThread:
+    tag: str
+    label: str
+    created_at: float  # monotonic; oldest evicted first at the per-label cap
 
 
 def _make_disambiguator(pid: int) -> str:
@@ -196,6 +174,7 @@ class Daemon:
         self._re_ping_every_seconds = re_ping_every_seconds
         self._clients: dict[str, _Client] = {}
         self._pending_asks: dict[str, _PendingAsk] = {}
+        self._notify_threads: dict[str, _NotifyThread] = {}
         self._queues: dict[str, deque[QueuedMessage]] = {}
         self._server: asyncio.AbstractServer | None = None
         self._start_time: float | None = None
@@ -309,6 +288,7 @@ class Daemon:
             if client_label is not None:
                 self._clients.pop(client_label, None)
                 await self._drop_asks_for_writer(writer, client_label)
+                self._drop_notify_threads_for_label(client_label)
             writer.close()
             with suppress(Exception):
                 await writer.wait_closed()
@@ -378,12 +358,7 @@ class Daemon:
             )
             return None
         if isinstance(msg, Notify):
-            info = await self._transport.notify(msg.message)
-            status = "failed" if info.startswith(FAILURE_PREFIX) else "ok"
-            await self._send(
-                writer,
-                NotifyResult(request_id=msg.request_id, status=status, info=info),
-            )
+            await self._handle_notify(msg, writer, client_label)
             return None
         if isinstance(msg, AskBegin):
             await self._handle_ask_begin(msg, writer, client_label)
@@ -404,6 +379,22 @@ class Daemon:
         )
         return None
 
+    async def _handle_notify(
+        self, msg: Notify, writer: asyncio.StreamWriter, client_label: str
+    ) -> None:
+        """A notify is a tagged, replyable thread (Notify Replyable Threads,
+        nr4kpq7v). Assign a tag, register the notify-thread so a later
+        `re <tag>` can route back, and send the DM anchored with the tag."""
+        tag = self._assign_thread_tag()
+        self._register_notify_thread(tag, client_label)
+        body = f"[{tag}] {client_label}: {msg.message}"
+        info = await self._transport.notify(body)
+        status = "failed" if info.startswith(FAILURE_PREFIX) else "ok"
+        await self._send(
+            writer,
+            NotifyResult(request_id=msg.request_id, status=status, info=info),
+        )
+
     async def _handle_ask_begin(
         self, msg: AskBegin, writer: asyncio.StreamWriter, client_label: str
     ) -> None:
@@ -415,9 +406,9 @@ class Daemon:
             give_up_after_seconds=msg.give_up_after_seconds,
             started_at=time.monotonic(),
             writer=writer,
+            tag=self._assign_thread_tag(),
         )
         self._pending_asks[msg.request_id] = pending
-        # Send the question DM with footer reflecting the current pending set.
         await self._send_question_dm(pending)
         # Start the timeout and re-ping tasks. The timeout task fires first
         # if the give_up_after_seconds deadline elapses without a reply; the
@@ -430,51 +421,49 @@ class Daemon:
         if pending is None:
             return  # idempotent — already resolved
         await self._cancel_ask_tasks(pending)
-        await self._send_dm_best_effort(
-            _closing_dm_text("withdrawn", pending.question)
-        )
+        await self._send_dm_best_effort(_closing_dm_text("withdrawn", pending.tag))
 
     async def _dispatch_user_message(self, content: str) -> None:
         """Called from DiscordTransport's on_message handler whenever a DM
-        arrives from the configured user. Routes the content and, for
-        bounce/ambiguous outcomes, replies on the Discord side so the user
-        sees the explanation on the same channel they used to send."""
+        arrives from the configured user. Routes the content and, for outcomes
+        that produce user-facing text (bounce / ambiguous / concierge), replies
+        on the Discord side so the user sees the explanation on the same
+        channel they used to send."""
         outcome, detail, _ = await self._route_and_act(content)
-        if outcome in ("bounced", "ambiguous"):
+        if outcome in ("bounced", "ambiguous", "concierge"):
             await self._send_dm_best_effort(detail)
 
     async def _route_and_act(self, content: str) -> tuple[str, str, object]:
-        """Shared core: apply Reply Routing Rules, perform the
-        queue/deliver side effects, and return (outcome_tag, detail_text,
-        decision). Side effects performed unconditionally; the caller
-        decides whether to send a Discord feedback DM (Discord path) or
-        return the detail via the calling channel (CLI inject path) per
-        CLI Inject Tool (ci7n4pvm)."""
-        snapshot = [self._to_routing_ask(p) for p in self._pending_asks.values()]
+        """Shared core for the Discord and CLI ingestion paths. Applies the
+        tag-based routing ladder (rt7nqp4m), performs the queue/deliver side
+        effects, and returns (outcome_tag, detail_text, decision). The caller
+        decides whether to surface detail as a Discord DM or via its own
+        channel."""
+        asks = [self._to_routing_ask(p) for p in self._pending_asks.values()]
+        notifies = [
+            NotifyThread(tag=nt.tag, label=nt.label)
+            for nt in self._notify_threads.values()
+        ]
         connected_labels = list(self._clients.keys())
-        decision = route_user_message(content, snapshot, connected_labels)
-        if isinstance(decision, Deliver):
-            await self._deliver_reply(decision.label, decision.content)
-            return ("delivered", f"Delivered to {decision.label}.", decision)
-        if isinstance(decision, EnqueueLabeled):
+        tag_to_label = {a.tag: a.label for a in asks}
+        decision = route_user_message(content, asks, notifies, connected_labels)
+
+        if isinstance(decision, Concierge):
+            return ("concierge", CONCIERGE_STUB, decision)
+        if isinstance(decision, DeliverAsk):
+            label = tag_to_label.get(decision.tag, "?")
+            await self._deliver_reply_by_tag(decision.tag, decision.content, label)
+            return ("delivered", f"Delivered to {label}.", decision)
+        if isinstance(decision, EnqueueNotifyReply):
             self._enqueue_message(
-                decision.label,
-                decision.content,
-                source="labeled_interjection",
-                original_question=None,
+                decision.label, decision.content,
+                source="notify_reply", tag=decision.tag,
             )
-            return (
-                "queued_labeled",
-                f"Queued for {decision.label}.",
-                decision,
-            )
+            return ("queued_notify_reply", f"Queued for {decision.label}.", decision)
         if isinstance(decision, Broadcast):
             for label in connected_labels:
                 self._enqueue_message(
-                    label,
-                    decision.content,
-                    source="broadcast",
-                    original_question=None,
+                    label, decision.content, source="broadcast", tag=None
                 )
             return (
                 "broadcast",
@@ -484,20 +473,21 @@ class Daemon:
         if isinstance(decision, Bounce):
             return ("bounced", decision.text, decision)
         # Ambiguous
-        return (
-            "ambiguous",
-            self._format_ambiguous_dm(decision.pending_asks),
-            decision,
-        )
+        return ("ambiguous", self._format_ambiguous_dm(decision.asks), decision)
 
     async def _handle_inject(
         self, request_id: str, content: str, writer: asyncio.StreamWriter
     ) -> None:
-        """Handle a CLI-side INJECT message. Performs the same routing as a
-        Discord-arrived message, but returns the outcome via INJECT_RESULT
-        rather than sending a feedback DM (the CLI user reads the outcome
-        in their terminal)."""
-        outcome, detail, _ = await self._route_and_act(content)
+        """Handle a CLI-side INJECT message: route as if Discord-arrived, but
+        return the outcome via INJECT_RESULT (the CLI user reads it in their
+        terminal). When the inject resolves an ask, also send a Discord closing
+        DM so the channel reflects that the question is answered (F-A fix,
+        pkn7mvq4) — the Discord-side user did not type the answer."""
+        outcome, detail, decision = await self._route_and_act(content)
+        if isinstance(decision, DeliverAsk) and outcome == "delivered":
+            await self._send_dm_best_effort(
+                _closing_dm_text("cli_answered", decision.tag)
+            )
         await self._send(
             writer,
             InjectResult(request_id=request_id, outcome=outcome, detail=detail),
@@ -506,8 +496,8 @@ class Daemon:
     async def _handle_list_asks(
         self, request_id: str, writer: asyncio.StreamWriter
     ) -> None:
-        """Handle a CLI-side LIST_ASKS message. Returns a formatted view of
-        pending asks for the user to choose from when answering via CLI."""
+        """Handle a CLI-side LIST_ASKS message: a formatted view of pending
+        asks (with tags) for the user to choose from when answering via CLI."""
         asks = self._pending_asks_newest_first()
         formatted = _format_pending_asks_for_list(asks)
         await self._send(
@@ -538,17 +528,19 @@ class Daemon:
             ),
         )
 
-    async def _deliver_reply(self, label: str, content: str) -> None:
-        # Find the (one) pending ask matching the label; route there.
+    async def _deliver_reply_by_tag(
+        self, tag: str, content: str, label: str
+    ) -> None:
         target_request_id: str | None = None
         for req_id, p in self._pending_asks.items():
-            if p.label == label:
+            if p.tag == tag:
                 target_request_id = req_id
                 break
         if target_request_id is None:
-            # Race: ask was resolved between routing snapshot and now. Treat
-            # as late_reply and enqueue.
-            self._enqueue_late_reply(label, content, original_question=None)
+            # Race: ask resolved between routing snapshot and now. Enqueue as a
+            # late_reply under the snapshot label, tagged so the agent can tell
+            # which thread it answered.
+            self._enqueue_message(label, content, source="late_reply", tag=tag)
             return
         pending = self._pending_asks.pop(target_request_id)
         await self._cancel_ask_tasks(pending)
@@ -558,28 +550,18 @@ class Daemon:
                 AskReply(request_id=pending.request_id, content=content),
             )
 
-    def _enqueue_late_reply(
-        self, label: str, content: str, original_question: str | None
-    ) -> None:
-        self._enqueue_message(
-            label, content, source="late_reply", original_question=original_question
-        )
-
     def _enqueue_message(
         self,
         label: str,
         content: str,
-        source: Literal["late_reply", "labeled_interjection", "broadcast"],
-        original_question: str | None,
+        source: Literal["late_reply", "notify_reply", "broadcast"],
+        tag: str | None,
     ) -> None:
         queue = self._queues.setdefault(label, deque(maxlen=_QUEUE_PER_LABEL_LIMIT))
         was_full = len(queue) == _QUEUE_PER_LABEL_LIMIT
         queue.append(
             QueuedMessage(
-                timestamp=time.time(),
-                content=content,
-                source=source,
-                original_question=original_question,
+                timestamp=time.time(), content=content, source=source, tag=tag
             )
         )
         if was_full:
@@ -588,27 +570,21 @@ class Daemon:
                 label,
             )
 
-    def _format_ambiguous_dm(
-        self, asks: tuple[RoutingPendingAsk, ...]
-    ) -> str:
-        lines = ["**Multiple asks waiting** — reply with the index or label prefix:"]
-        for i, ask in enumerate(asks, start=1):
-            lines.append(f"  [{i}] *{ask.label}*: {ask.question}")
+    def _format_ambiguous_dm(self, asks: tuple[AskThread, ...]) -> str:
+        lines = ["Multiple questions are waiting — reply with a tag:"]
+        for ask in asks:
+            lines.append(f"  [{ask.tag}] {ask.label}: {ask.question}")
         return "\n".join(lines)
 
     async def _send_question_dm(self, pending: _PendingAsk) -> None:
-        asks = self._pending_asks_newest_first()
-        footer = _compose_ask_footer(asks)
-        body = f"**Question** *({pending.label})*: {pending.question}{footer}"
+        body = f"[{pending.tag}] {pending.label}: {pending.question}"
         await self._send_dm_best_effort(body)
 
     async def _re_ping_loop(self, pending: _PendingAsk) -> None:
-        """Periodically remind the user that an ask is still open.
-
-        Skips any re-ping that would land within _SKIP_REPING_NEAR_DEADLINE
-        seconds of the give_up_after_seconds deadline (avoids "still waiting"
-        followed seconds later by a timeout DM). Send failures are non-fatal:
-        the ask still resolves on reply or timeout per its own contract."""
+        """Periodically remind the user that an ask is still open, anchored with
+        the thread tag. Skips any re-ping that would land within
+        _SKIP_REPING_NEAR_DEADLINE seconds of the deadline. Send failures are
+        non-fatal: the ask still resolves on reply or timeout."""
         deadline_at = pending.started_at + pending.give_up_after_seconds
         while True:
             try:
@@ -618,9 +594,10 @@ class Daemon:
             remaining = deadline_at - time.monotonic()
             if remaining < _SKIP_REPING_NEAR_DEADLINE:
                 return
-            asks = self._pending_asks_newest_first()
-            footer = _compose_ask_footer(asks)
-            body = f"Still waiting on your answer to: *{pending.question}*{footer}"
+            body = (
+                f"Re: {pending.tag} — still waiting on your answer: "
+                f"{pending.question}"
+            )
             try:
                 await self._transport.notify(body)
             except Exception as exc:
@@ -647,7 +624,7 @@ class Daemon:
                 ),
             )
         await self._send_dm_best_effort(
-            _closing_dm_text(pending.on_timeout, pending.question)
+            _closing_dm_text(pending.on_timeout, pending.tag)
         )
 
     async def _cancel_ask_tasks(self, pending: _PendingAsk) -> None:
@@ -662,15 +639,47 @@ class Daemon:
         self, writer: asyncio.StreamWriter, client_label: str
     ) -> None:
         """When an MCP server disconnects, drop its pending asks immediately
-        and DM the user once per dropped ask. No retention (per Orphan Ask
-        Drop Policy, v4kn7mpq)."""
+        and DM the user once per dropped ask. No retention (Orphan Ask Drop
+        Policy, v4kn7mpq)."""
         orphans = [p for p in self._pending_asks.values() if p.writer is writer]
         for pending in orphans:
             self._pending_asks.pop(pending.request_id, None)
             await self._cancel_ask_tasks(pending)
             await self._send_dm_best_effort(
-                _closing_dm_text("lost_contact", pending.question)
+                _closing_dm_text("lost_contact", pending.tag)
             )
+
+    def _drop_notify_threads_for_label(self, label: str) -> None:
+        """A notify-thread is addressable only while its agent is connected
+        (Notify Replyable Threads, nr4kpq7v); drop them on disconnect."""
+        for tag in [
+            t for t, nt in self._notify_threads.items() if nt.label == label
+        ]:
+            self._notify_threads.pop(tag, None)
+
+    def _register_notify_thread(self, tag: str, label: str) -> None:
+        same_label = [
+            nt for nt in self._notify_threads.values() if nt.label == label
+        ]
+        if len(same_label) >= _NOTIFY_TAGS_PER_LABEL:
+            oldest = min(same_label, key=lambda nt: nt.created_at)
+            self._notify_threads.pop(oldest.tag, None)
+        self._notify_threads[tag] = _NotifyThread(
+            tag=tag, label=label, created_at=time.monotonic()
+        )
+
+    def _active_tags(self) -> set[str]:
+        return {p.tag for p in self._pending_asks.values()} | set(
+            self._notify_threads.keys()
+        )
+
+    def _assign_thread_tag(self) -> str:
+        active = self._active_tags()
+        for _ in range(100):
+            tag = _make_thread_tag()
+            if tag not in active:
+                return tag
+        raise RuntimeError("could not assign a unique thread tag after 100 tries")
 
     def _pending_asks_newest_first(self) -> list[_PendingAsk]:
         return sorted(
@@ -679,9 +688,9 @@ class Daemon:
             reverse=True,
         )
 
-    def _to_routing_ask(self, pending: _PendingAsk) -> RoutingPendingAsk:
-        return RoutingPendingAsk(
-            request_id=pending.request_id,
+    def _to_routing_ask(self, pending: _PendingAsk) -> AskThread:
+        return AskThread(
+            tag=pending.tag,
             label=pending.label,
             question=pending.question,
             started_at=pending.started_at,
