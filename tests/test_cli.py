@@ -525,6 +525,33 @@ def test_main_hook_stop_blocks_when_away(cli_presence, tmp_path, monkeypatch, ca
     assert "away from the keyboard" in capsys.readouterr().err
 
 
+def test_main_hook_silences_warning_logging(cli_presence, monkeypatch):
+    """Regression for hk7nqp4m: a WARNING logged while the hook runs (e.g. the
+    WSL XDG_RUNTIME_DIR fallback in paths.py) must NOT reach stderr via Python's
+    lastResort handler, or Claude Code mislabels the whole hook invocation a
+    'Stop hook error'. The hook entrypoint must disable warning-level logging so
+    the process emits only its intended payload. Asserted via the mechanism
+    (warning logging disabled) because pytest's own log capture masks the
+    lastResort-to-stderr path this bug rides on."""
+    import logging
+
+    captured = {}
+
+    def check_logging_state(_stdin):
+        captured["warning_enabled"] = logging.getLogger("confer.paths").isEnabledFor(
+            logging.WARNING
+        )
+        return (0, "")
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr("confer.hooks.run_stop_hook", check_logging_state)
+    assert main(["hook", "stop"]) == 0
+    assert captured["warning_enabled"] is False, (
+        "hook entrypoint must disable WARNING logging so paths.py's "
+        "XDG fallback warning cannot leak to stderr"
+    )
+
+
 def test_main_install_hooks_applies(monkeypatch, capsys):
     from confer import integrations
     monkeypatch.setattr(

@@ -75,6 +75,61 @@ def test_stop_allows_when_confer_tool_used_after_last_user(tmp_path):
     assert hooks.run_stop_hook(payload, presence=AWAY) == (0, "")
 
 
+def test_stop_allows_when_confer_tool_used_then_its_tool_result_follows(tmp_path):
+    """Regression for lp7nkq4x: a tool_result is recorded as type=='user'.
+    The agent's own notify tool_result must NOT reset the 'last human turn'
+    window and cause a re-nudge — the guard must still see the confer call."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [
+        {"type": "user", "message": {"content": [
+            {"type": "text", "text": "do the thing and notify me"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__confer__notify", "input": {}}]}},
+        # The notify's OWN result — Claude Code records this as type=='user'.
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "sent at ..."}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "done, notified you"}]}},
+    ])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    assert hooks.run_stop_hook(payload, presence=AWAY) == (0, "")
+
+
+def test_stop_blocks_when_genuine_human_prompt_follows_confer_tool(tmp_path):
+    """The flip side of lp7nkq4x: if the human actually typed a NEW prompt
+    after the agent's confer call, that's a fresh turn — the agent has not
+    reached out since, so block."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__confer__notify", "input": {}}]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "sent at ..."}]}},
+        # A REAL human prompt (carries text, not just a tool_result).
+        {"type": "user", "message": {"content": [
+            {"type": "text", "text": "ok now do the next thing"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "working"}]}},
+    ])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    assert hooks.run_stop_hook(payload, presence=AWAY)[0] == 2
+
+
+def test_stop_treats_user_with_nonlist_content_as_human_turn(tmp_path):
+    """_is_genuine_human_turn: a type=='user' message whose content is neither
+    a str nor a list (e.g. null/dict) is treated conservatively as a human turn
+    (lp7nkq4x). Here the only confer call precedes such a message, so the guard
+    sees no confer tool since the last human turn → block."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__confer__notify", "input": {}}]}},
+        {"type": "user", "message": {"content": None}},
+    ])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    assert hooks.run_stop_hook(payload, presence=AWAY)[0] == 2
+
+
 def test_stop_handles_messy_transcript(tmp_path):
     t = tmp_path / "t.jsonl"
     lines = [

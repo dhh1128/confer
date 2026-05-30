@@ -26,10 +26,35 @@ _AWAY_REASON = (
 )
 
 
+def _is_genuine_human_turn(obj: dict) -> bool:
+    """True if `obj` is a real human prompt, not a tool_result envelope.
+
+    Claude Code records BOTH human prompts and tool_results as messages with
+    type=='user' (lp7nkq4x). A tool_result envelope's content is composed
+    solely of tool_result blocks; a genuine human turn carries text or other
+    blocks. We must key the 'since the last human turn' window off the latter,
+    or the agent's own confer tool_result resets the window and the guard
+    re-nudges after the agent already reached out."""
+    if obj.get("type") != "user":
+        return False
+    content = (obj.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return True  # a plain-string human prompt
+    if not isinstance(content, list):
+        return True  # unknown shape → treat as a human turn (conservative)
+    # A human turn if any block is NOT a tool_result (text, image, etc.). An
+    # all-tool_result message is the agent's tool output, not a human turn.
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+            return True
+    return False
+
+
 def _confer_tool_used_since_last_user(transcript_path: str) -> bool:
-    """True if any mcp__confer__* tool_use appears after the last human turn in
-    the JSONL transcript. Fail-open: any read/parse trouble returns True (treat
-    as 'already reached out') so the Stop hook does not block (eh7nqkp4)."""
+    """True if any mcp__confer__* tool_use appears after the last GENUINE human
+    turn in the JSONL transcript. Fail-open: any read/parse trouble returns True
+    (treat as 'already reached out') so the Stop hook does not block (eh7nqkp4).
+    """
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             raw_lines = f.readlines()
@@ -49,7 +74,7 @@ def _confer_tool_used_since_last_user(transcript_path: str) -> bool:
         parsed.append(obj if isinstance(obj, dict) else None)
     last_user = -1
     for i, obj in enumerate(parsed):
-        if obj is not None and obj.get("type") == "user":
+        if obj is not None and _is_genuine_human_turn(obj):
             last_user = i
     for obj in parsed[last_user + 1:]:
         if obj is None or obj.get("type") != "assistant":

@@ -222,7 +222,16 @@ def _cmd_presence() -> int:
 
 
 def _cmd_hook(event: str) -> int:
-    """Internal: dispatch a Claude Code hook event (eh7nqkp4 / ar7nqkp4)."""
+    """Internal: dispatch a Claude Code hook event (eh7nqkp4 / ar7nqkp4).
+
+    Silence warning-level logging first (hk7nqp4m): the hook delivers its result
+    on stderr (exit 2 + text), and any stray log WARNING — e.g. paths.py's WSL
+    XDG_RUNTIME_DIR fallback — would otherwise reach stderr via Python's
+    lastResort handler and be mislabeled by Claude Code as a 'Stop hook error'.
+    The hook must emit ONLY its intended payload."""
+    import logging
+
+    logging.disable(logging.WARNING)
     if event == "prompt":
         return hooks.run_prompt_hook()
     code, stderr_text = hooks.run_stop_hook(sys.stdin.read())
