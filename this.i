@@ -1834,9 +1834,12 @@ Confer = goal:
         "tools an agent may choose to use" to "a presence mode the human
         toggles." Latency inherits Confer's 2-3 min target (k7m3pq2x). The
         feature is realized by the decisions below: presence storage
-        (pf4nqkx7), a toggle surface (tg7nqkp4), Stop-hook enforcement
-        (eh7nqkp4), auto-return on keyboard input (ar7nqkp4), and an explicit
-        installer (ii7nqkp4).
+        (pf4nqkx7), a toggle surface (tg7nqkp4, superseded by the away/back/
+        status surface av7nkp4x), Stop-hook enforcement (eh7nqkp4), auto-return
+        on keyboard input (ar7nqkp4), and an explicit installer (ii7nqkp4).
+        Extended with scheduled away transitions (sq7nkp4x) so daniel can
+        pre-arm away mode for known-future meetings, with an activation notice
+        (cs7nkp4x) confirming each transition.
 
     Presence As A Workstation File = decision:
       id: pf4nqkx7
@@ -1864,10 +1867,30 @@ Confer = goal:
         isolation was never the obstacle. A daemon flag can still be added
         later if the daemon itself ever needs presence-aware behavior.
 
-    Toggle Surface confer away/back/presence = decision:
+        REFINED by Scheduled Away Transitions (sq7nkp4x): the presence file is
+        no longer a single binary fact (present/away) but current-state PLUS a
+        small bounded queue of future away activations. The robustness argument
+        above is preserved intact — the ENFORCEMENT read ("am I effectively
+        away right now?") is still a pure function of the file plus the clock
+        (effective-away = sticky-away OR any pending activation whose time has
+        arrived), so the global Stop hook still does a dependency-free file
+        stat with no daemon round-trip. Only the optional activation NOTICE
+        (cs7nkp4x) needs a running daemon, and that is explicitly best-effort.
+
+    Toggle Surface confer away/back/status = decision:
       id: tg7nqkp4
       why: >
-        The toggle is three `confer` CLI subcommands — `confer away [--note]`,
+        SUPERSEDED by Away Back Status Command Surface (av7nkp4x), which keeps
+        the file-writes-shared-state-from-any-window core of this decision but
+        (1) replaces the binary `confer presence` reader with `confer status`
+        (a reader is a distinct verb from the away/back mutators — say what you
+        mean), (2) makes `status` CLI-ONLY (a slash command only exists inside
+        a session, where you are by definition at the keyboard and already know
+        you are present, so an in-Claude status query is meaningless), and (3)
+        adds the scheduling forms (away in/at, back at/all) of sq7nkp4x. The
+        original rationale retained below for lineage.
+
+        The toggle is `confer` CLI subcommands — `confer away [--note]`,
         `confer back`, `confer presence` — that read/write the presence file
         (pf4nqkx7) directly and never touch the daemon. One command from any
         window (or `! confer away` inside a session) flips global state.
@@ -1920,6 +1943,16 @@ Confer = goal:
         explicit `confer back` always: rejected as needless friction given the
         keyboard signal is unambiguous and free.
 
+        REFINED by Scheduled Away Transitions (sq7nkp4x): with a schedule
+        present, "typing == confer back" is made precise — a keyboard prompt
+        clears the CURRENT away and any already-FIRED schedule entry, but does
+        NOT cancel still-PENDING future activations. This is the invariant that
+        makes prompt-first ordering safe: daniel can schedule `away at 1100`,
+        then keep typing into sessions, and the 11:00 activation still fires.
+        The UserPromptSubmit hook therefore performs the same operation as bare
+        `confer back` (present-now, pending-survive), not a full schedule wipe
+        (that is `confer back all`).
+
     Integrations Installed Explicitly = decision:
       id: ii7nqkp4
       why: >
@@ -1934,6 +1967,215 @@ Confer = goal:
         the hook runs regardless of the hook process's PATH. This composes with
         confer setup Subcommand (st7nqkp4). Considered auto-installing during
         `confer setup`: rejected — global-harness mutation must be opt-in.
+
+    Scheduled Away Transitions = decision:
+      id: sq7nkp4x
+      why: >
+        Away mode gains a bounded schedule of FUTURE activations, so daniel can
+        say in advance "go away at 11:00" and "go away at 14:00" (meetings he
+        knows about hours ahead) without remembering to do it at the moment.
+        This exists to kill a fragility he hit directly: the only way to enter
+        away "around" a task was to toggle it AFTER prompting (because a
+        keyboard prompt clears away, ar7nqkp4) — an order-dependent ritual that
+        is easy to get wrong. A pre-scheduled activation removes the ordering
+        problem entirely: schedule first, work freely, away lands on time.
+
+        State model. Presence (pf4nqkx7) becomes: a current sticky-away flag
+        (with optional note + since) PLUS a list of pending entries, each an
+        activation epoch + optional note. EFFECTIVE-AWAY, the only thing the
+        Stop hook (eh7nqkp4) cares about, is a pure function of file + clock:
+        sticky-away is true, OR some pending entry's time has arrived. So the
+        hot-path read stays a dependency-free file stat — the robustness
+        property of pf4nqkx7 is deliberately preserved. When a pending entry's
+        time arrives it is "fired": from that instant effective-away is true;
+        the entry can then be retired into the sticky-away flag (carrying its
+        note) the next time any writer touches the file, or simply remain in
+        the list as an arrived entry — both yield the same effective-away, and
+        the activation notice (cs7nkp4x) handles the user-visible signal.
+
+        Time inputs (av7nkp4x covers the command words): `at <HHMM>` means that
+        clock time today, or — if it has already passed — the same time
+        TOMORROW. This single rule gives the 24h cap for free: tomorrow-at-an-
+        earlier-clock-time is by definition under 24h out, and no input can
+        name a moment more than 24h ahead. Deliberately NOT a general calendar:
+        no dates, no recurrence, nothing beyond 24h, no persistence across a
+        reboot (XDG_RUNTIME_DIR clears — consistent with pf4nqkx7's "reboot
+        means present"). This is an ephemeral same-day/overnight convenience,
+        not a standing away calendar — daniel explicitly does not want a
+        permanent schedule.
+
+        Cancellation semantics (the `back` verbs, surfaced in av7nkp4x):
+        - bare `back` / typing a prompt: become present NOW. Clears sticky-away
+          and discards any already-FIRED entry, but LEAVES pending future
+          entries (the ar7nqkp4 invariant). So typing at 10:50 makes you
+          present; an 11:00 entry still fires.
+        - `back at <HHMM>`: cancel the one PENDING entry matching that time. If
+          none matches (typo, or it already fired), say so explicitly and list
+          what is pending — never a silent no-op.
+        - `back all`: the big hammer — clear current away AND wipe the entire
+          pending queue (clean slate).
+        Considered making typing wipe the whole schedule (consistent with the
+        old binary clear): rejected — it would re-introduce the exact ordering
+        fragility this feature removes, since the task prompt would cancel the
+        away you just scheduled.
+
+    Away Back Status Command Surface = decision:
+      id: av7nkp4x
+      why: >
+        The user-facing surface is two MUTATORS and one READER, named so each
+        word says exactly what it does:
+          away   (enter away)   — now | `in <min>` | `at <HHMM>` ; optional --note
+          back   (leave/cancel) — now | `at <HHMM>` | `all`
+          status (report)       — current state + the pending schedule
+        `away` and `back` are imperatives that change state; `status` only
+        reads. They are kept separate verbs precisely because overloading a
+        mutator to also answer "what is my state?" muddies meaning — an earlier
+        draft folded the query into `away when`, rejected for that reason.
+        Immediate `away` is the `in 0` / activate-now case, so the existing
+        zero-arg behavior is unchanged and backward compatible.
+
+        Surface split by reachability: `/away` and `/back` are installed as
+        slash commands (in-Claude) AND exist as CLI subcommands; `status` is
+        CLI-ONLY. Rationale: a slash command only exists inside a Claude
+        session, and if daniel is typing inside Claude he is at the keyboard
+        and therefore present — an in-session status query is meaningless. He
+        needs status exactly when he is AWAY from Claude, which is the terminal
+        (`confer status`). So no `/status` slash command and no status.md is
+        written by ii7nqkp4; the installer continues to emit only away.md and
+        back.md. The slash commands remain thin wrappers that pass their
+        arguments through to the CLI (so `/away at 1100` works), keeping the
+        CLI the single source of behavior (tg7nqkp4 lineage).
+
+        `confer status` output shows the current state on the first line
+        (present, or away with note) followed by any scheduled activations with
+        their times and notes; empty schedule prints just the current state.
+
+    Away Activation Notice = decision:
+      id: cs7nkp4x
+      why: >
+        When a scheduled away (sq7nkp4x) transitions from pending to active,
+        daniel gets a Discord DM — "confer: Now in away mode" plus the entry's
+        note if any — so he has positive confirmation it engaged. This is the
+        signal he asked for, and the DM (not a terminal print) is the right
+        channel because by activation time he has walked away from the keyboard;
+        the phone is where he is looking. It also doubles as a free liveness
+        check of the Discord path. Mechanism: a lightweight presence-watch task
+        in the daemon polls the presence file on a coarse cadence (~15s, well
+        inside the 2-3 min latency target k7m3pq2x) and, on observing a
+        pending→active transition it has not yet announced, sends the DM and
+        records that it announced it (in-memory). At-most-once is best-effort,
+        not guaranteed (see deviation nd7nkp4x). Considered firing the DM from
+        the CLI/hook write path instead of the daemon: rejected — the
+        transition happens at a wall-clock TIME with nothing necessarily
+        executing then (the whole point is daniel is not interacting), so only
+        a running watcher can observe it; the CLI that SCHEDULED it exited
+        minutes earlier.
+
+      children:
+
+        Activation Notice Requires Live Daemon = deviation:
+          id: nd7nkp4x
+          deviates-from: cs7nkp4x
+          scope: >
+            The pending→active activation DM (cs7nkp4x) is delivered only if
+            the daemon is running at the activation time, and is at-most-once
+            only within a single daemon lifetime — a daemon restart around the
+            transition may drop the notice, or (less likely) re-announce once.
+          why: >
+            Unlike away ENFORCEMENT, which is a daemon-independent file stat on
+            the Stop-hook hot path (pf4nqkx7 / sq7nkp4x) and so always works,
+            the activation NOTICE is an active push that intrinsically needs a
+            live watcher at a specific wall-clock moment. Guaranteeing it would
+            require durable, restart-surviving delivery state and a wakeup
+            mechanism — disproportionate for a convenience confirmation whose
+            absence costs only that daniel does not get a "you are now away"
+            buzz (away still correctly engages regardless). Accepted as
+            best-effort; the enforcement guarantee is the one that matters and
+            is unaffected.
+          approved-by: daniel, 2026-05-29
+
+    Away State Not Observable Mid-Turn = tension:
+      id: ax7nqp4k
+      nature: >
+        A live experiment tried to have the agent PROBE whether away mode was
+        active during its turn — via check_messages, the return value of a
+        notify call, and listMcpResources — and could not. This is structurally
+        impossible by current design, not a bug: away mode is enforced ONLY by
+        the global Stop hook at turn-end (eh7nqkp4); there is no MCP tool or
+        resource that exposes away-state, so listMcpResources returned empty and
+        a successful notify does not reveal the mode. The agent behaved
+        correctly and hedged honestly about not knowing. The consequence to
+        record: any test, prompt, or workflow that assumes the agent can query
+        away-state mid-turn cannot work against the current architecture — the
+        only observable manifestation of away mode is the stop-time nudge
+        itself. See the design fork (vk7nqp4x) for whether to change this; cross-
+        reference eh7nqkp4.
+
+    Queued Away Slash Command Never Fires And Is Unsafe = tension:
+      id: bz7nkp4q
+      nature: >
+        In Claude Code, a slash command typed while the agent is mid-turn does
+        not execute then — it sits in the input queue and fires only AFTER the
+        turn completes. In the experiment the agent never completed its turn
+        (long sleep plus probing, effectively stuck), so a `/away` typed to arm
+        away mode stayed pending the entire ~4 minutes and never set away mode at
+        all. This is Claude Code harness behavior, not a confer bug, but it means
+        `/away` cannot be relied on to arm away mode while an agent is working.
+        WORSE, it is a latent SAFETY hazard: a queued `/away` that finally
+        dequeues AFTER daniel has typed a return prompt (which set him present
+        via ar7nqkp4) would silently flip him back to away while he is actually
+        present at the keyboard. This is strong motivation for arming away from
+        an EXTERNAL shell (or via scheduled-away, sq7nkp4x) rather than an
+        in-session slash command, and is direct evidence that the manual
+        prompt-driven toggle ordering is inherently fragile. Cross-reference
+        ar7nqkp4 and sq7nkp4x.
+
+    Correct Manual Away-Test Procedure = tension:
+      id: dm7nkp4r
+      nature: >
+        Recorded as intent so the experiment procedure is not re-derived wrongly
+        next time. Because typing a prompt into the Claude session fires the
+        UserPromptSubmit hook and clears presence to present (ar7nqkp4), you
+        CANNOT arm-away-then-type-the-task — the task prompt would immediately
+        cancel the away you just set. The only ordering that works with the
+        current code is: (1) type the short task into the session — this must be
+        the LAST keyboard action in that session; (2) let the agent start
+        working; (3) from an EXTERNAL shell run `confer away` while the agent is
+        mid-turn, where nothing clears it; (4) do not touch that session's
+        keyboard again; (5) the agent finishes, tries to stop, and the Stop hook
+        fires the nudge — THIS nudge is the entire observable behavior of away
+        mode; (6) return deliberately via a prompt or `confer back`. A LONG
+        teed-up task actually HIDES the effect, because the agent never tries to
+        stop and so the Stop hook never fires. This fragility is exactly what
+        scheduled-away (sq7nkp4x, whose "typing does not cancel a pending entry"
+        invariant removes the ordering dependence) exists to eliminate.
+
+    Should Away-State Be Made Agent-Visible = tension:
+      id: vk7nqp4x
+      nature: >
+        OPEN DESIGN FORK — unresolved, for daniel to decide later, adjacent to
+        the scheduled-away work. The experiment assumed away-state should be
+        queryable by the agent; today it deliberately is not (ax7nqp4k). There
+        are two legitimate paths.
+
+        EXPOSE it: make away-state agent-visible — e.g. as an MCP resource, or
+        folded into the check_messages return value, or surfaced in tool
+        descriptions — so the agent can SEE the mode and proactively adapt
+        (prefer ask/notify, batch its reporting differently, avoid idling)
+        rather than only being reactively nudged at stop-time. Upside: the agent
+        cooperates with the policy instead of being caught by the hook after the
+        fact; mid-turn behavior can improve.
+
+        KEEP it invisible (the current hook-only design, eh7nqkp4): away mode is
+        a human-side POLICY enforced by the harness, not a fact the agent should
+        reason about. Upside: making it agent-visible invites agents to reason
+        about — and potentially around — the mode, adds MCP surface, and couples
+        agent behavior to a workstation-locality fact (pf4nqkx7) the agent has
+        no business depending on. The Stop hook already guarantees the behavior
+        without the agent knowing why.
+
+        Left UNRESOLVED on purpose. Cross-reference eh7nqkp4, ax7nqp4k, and
+        sq7nkp4x.
 
     # ─── DISTRIBUTION ────────────────────────────────────────────────────────
 
