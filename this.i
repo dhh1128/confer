@@ -1382,6 +1382,43 @@ Confer = goal:
         margins that flake on a loaded runner. The skip-near-deadline
         decision is also a pure helper unit-tested across the 60s boundary.
 
+    Component Tier Real Socket Fake Transport = decision:
+      id: c7nq4xkp
+      why: >
+        A fourth tier — "component" — sits between unit and integration and,
+        unlike them, is deterministic, network-free, human-free, runs in CI,
+        and DOES count toward the 100% coverage gate (it exercises only our
+        own code). It refines Two-Layer Test Strategy (7vpm2qkx) into a
+        taxonomy of four: unit -> component -> integration -> interactive
+        (k4n7pqx2). It exists to close a real seam the other tiers leave open:
+        the unit tests run the real serve()+socket but against a MOCKED
+        transport, and the DaemonClient unit tests run the real client against
+        a HAND-ROLLED fake daemon — so the real client and the real
+        serve()/IPC layer are each only ever tested against a fake
+        counterpart, never against EACH OTHER across the actual unix socket.
+        The component tier wires the real Daemon + real serve() on a real
+        tmp-dir socket to a real DaemonClient over that socket, faking ONLY
+        the discord.py transport via the existing `transport=` constructor
+        seam (the same seam the unit tests already use — no production
+        test-only backdoor is added). The fake transport additionally exposes
+        an inject(content) method that calls the daemon's on_user_message
+        callback, simulating an inbound Discord DM. This lets the tier cover,
+        deterministically and in CI, the one path that otherwise needs a live
+        human (interactive tier) or cannot be reached at all (integration,
+        since the bot cannot DM itself): inbound message -> route -> IPC ->
+        client, i.e. a reply returning through ask() (next-message-wins,
+        rt7nqp4m) and an unsolicited DM surfacing via check_messages. This is
+        NOT the "slice layer" rejected in 7vpm2qkx: that rejection was about
+        mocking BELOW discord.py at the HTTP level (friction, no benefit);
+        here the fake sits AT the discord.py boundary while everything below
+        the transport — process wiring, socket, framing, routing — is real.
+        The tiers are complementary: component proves our wiring is correct
+        and stays correct (in CI, free); integration remains the only catch
+        for real discord.py API drift; interactive remains the only proof of
+        the real end-to-end Discord UX. Lives in tests/test_component.py
+        (under tests/, NOT tests/integration/) precisely because it is gate-
+        eligible and must run by default, unlike the two opt-in tiers.
+
     Interactive Human-In-The-Loop Test Tier = decision:
       id: k4n7pqx2
       why: >
