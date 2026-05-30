@@ -6,7 +6,21 @@ import pytest
 from confer.config import Settings, default_config_path
 
 
-def test_default_config_path_is_xdg_conformant():
+def test_default_config_path_is_xdg_conformant(monkeypatch):
+    monkeypatch.delenv("CONFER_CONFIG", raising=False)
+    assert default_config_path() == Path.home() / ".config" / "confer" / "config.toml"
+
+
+def test_confer_config_env_overrides_default_path(monkeypatch, tmp_path):
+    override = tmp_path / "elsewhere" / "config.toml"
+    monkeypatch.setenv("CONFER_CONFIG", str(override))
+    assert default_config_path() == override
+
+
+def test_empty_confer_config_env_falls_back_to_default(monkeypatch):
+    """An exported-but-blank CONFER_CONFIG is treated as unset, not as a
+    request to load a file literally named '' (w3kq7nxp)."""
+    monkeypatch.setenv("CONFER_CONFIG", "")
     assert default_config_path() == Path.home() / ".config" / "confer" / "config.toml"
 
 

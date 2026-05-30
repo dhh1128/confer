@@ -1,4 +1,5 @@
 import logging
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,13 @@ log = logging.getLogger(__name__)
 
 
 def default_config_path() -> Path:
+    """The config path the daemon loads when Settings.load() is called with no
+    explicit argument. CONFER_CONFIG overrides the XDG default (Config Path
+    Override Via CONFER_CONFIG, w3kq7nxp); an exported-but-blank value is
+    treated as unset."""
+    override = os.environ.get("CONFER_CONFIG")
+    if override:
+        return Path(override)
     return Path.home() / ".config" / "confer" / "config.toml"
 
 

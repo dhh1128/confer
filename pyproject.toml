@@ -51,7 +51,12 @@ dev = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers --cov=confer --cov-branch --cov-report=term-missing --cov-fail-under=100"
+markers = [
+    "integration: live end-to-end test against a real Discord bot; gated behind CONFER_INTEGRATION=1, skipped by default, exempt from coverage (this.i gjx4m7p2).",
+    "interactive: human-in-the-loop test; you act in Discord. Gated behind --interactive, skipped by default, exempt from coverage (this.i k4n7pqx2).",
+]
 
 [tool.coverage.run]
 branch = true
 source = ["confer"]
+omit = ["tests/integration/*"]

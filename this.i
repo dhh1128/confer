@@ -195,11 +195,20 @@ Confer = goal:
           id: gjx4m7p2
           deviates-from: 7hp2nqkb
           scope: >
-            Tests in the integration tier (those gated behind the
-            CONFER_INTEGRATION=1 env var and requiring a live Discord test
-            bot) are not included in coverage measurement. The 100% branch
-            target applies only to unit tests of production code with the
-            discord.py boundary mocked.
+            Tests in the integration tier (gated behind the CONFER_INTEGRATION=1
+            env var) AND the interactive tier (gated behind --interactive,
+            Interactive Human-In-The-Loop Test Tier k4n7pqx2) are not included
+            in coverage measurement. The 100% branch target applies only to
+            unit tests of production code with the discord.py boundary mocked.
+            Mechanics: --cov-fail-under=100 lives in addopts and so applies to
+            every run; because a live test exercises only a sliver of code, the
+            opt-in tiers are run with an explicit --no-cov flag (which reliably
+            overrides addopts coverage) so the run exits 0 instead of tripping
+            the gate. Programmatic auto-disable from a conftest hook was tried
+            and abandoned — pytest-cov reads its options too early for a hook to
+            override, and an explicit flag is more transparent anyway. The
+            canonical coverage gate is the plain `uv run pytest` with neither
+            opt-in active.
           why: >
             Integration tests against the live Discord API are non-reproducible
             (network dependency, real bot tokens, rate limits, eventual
@@ -471,6 +480,31 @@ Confer = goal:
         only one config-loading site (the daemon), and a small dataclass over
         tomllib.load is enough validation. .env in the repo no longer holds
         secrets; .env.example becomes obsolete and is removed.
+
+    Config Path Override Via CONFER_CONFIG = decision:
+      id: w3kq7nxp
+      why: >
+        default_config_path() consults the CONFER_CONFIG environment variable
+        first and falls back to the XDG default
+        ~/.config/confer/config.toml when it is unset or empty. Refines
+        Global Config In ~/.config/confer/config.toml (hq7x3npm): the global
+        default is still the one-and-only path a normal user ever needs, but
+        a single env var lets a process be pointed at an alternate config
+        without code changes. The motivating use is the integration test tier
+        (Integration Tests Not Yet Implemented, 5nqx7pmw): the test copies the
+        real bot credentials into a throwaway temp config and sets
+        CONFER_CONFIG so the auto-spawned confer-daemon loads THAT file,
+        leaving daniel's real ~/.config/confer/config.toml untouched. It is
+        also generally useful for running a second bot identity, or for
+        anyone who keeps dotfiles outside $HOME. Considered overloading the
+        existing path argument to Settings.load (already supported, but the
+        daemon entrypoint calls Settings.load() with no argument, so a test
+        cannot reach it without an env-level hook). Considered a CLI flag on
+        confer-daemon: more surface, and the auto-spawn path constructs the
+        argv itself, so a flag would not survive the spawn — an env var is
+        inherited by Popen for free. Empty string is treated as unset (not as
+        a request to load a file literally named "") to avoid a confusing
+        failure when the var is exported-but-blank.
 
     Auto-Derived Agent Labels = decision:
       id: gj7wnq4p
@@ -1348,6 +1382,37 @@ Confer = goal:
         margins that flake on a loaded runner. The skip-near-deadline
         decision is also a pure helper unit-tested across the 60s boundary.
 
+    Interactive Human-In-The-Loop Test Tier = decision:
+      id: k4n7pqx2
+      why: >
+        A third, explicitly-manual test tier sits beside the unit and
+        integration tiers of Two-Layer Test Strategy (7vpm2qkx). Some
+        behavior cannot be exercised without a human acting on real Discord:
+        the inbound on_message -> route path (a reply that next-message-wins
+        delivers back through ask, an unsolicited DM that broadcasts into
+        check_messages). The integration tier can only drive OUTBOUND calls
+        (notify, the ask question DM, the timeout machinery) because the bot
+        only accepts DMs whose author.id matches the configured user, so it
+        cannot feed itself. These interactive tests live under
+        tests/integration/ marked `interactive` and are gated behind a
+        dedicated pytest flag, --interactive, kept SEPARATE from the
+        integration tier's CONFER_INTEGRATION=1 env gate so a normal (or even
+        a normal integration) run never blocks waiting on a person. Run them
+        with `uv run pytest --interactive -s --no-cov tests/integration/test_interactive.py`;
+        each test prints an ACTION REQUIRED prompt (to /dev/tty so it shows
+        through pytest capture) telling the operator exactly what to send in
+        Discord, then waits up to 180s. They are exempt from coverage for the
+        same reasons as the integration tier (Integration Tests Exempt,
+        gjx4m7p2). HOW/WHEN TO RUN: manually, at milestones and before a
+        release, whenever the daemon's routing, the transport's inbound
+        handler, or the client's ask/check_messages paths change — they are
+        the only automated proof that a real human's Discord message reaches
+        the right agent. A pytest flag was chosen over a third env var
+        because the operator types this one by hand at an interactive
+        terminal (where a CLI flag is the natural idiom), whereas
+        CONFER_INTEGRATION is also inherited by the spawned daemon subprocess
+        (which the --interactive flag need not be).
+
     # ─── OPEN TENSIONS ───────────────────────────────────────────────────────
 
     Pending Ask Lost On MCP Server Death = tension:
@@ -1445,12 +1510,32 @@ Confer = goal:
         strategy is currently one layer. Testability Hawk (2026-05-28)
         raised this; it is also the strict precondition for closing the
         Mock Depth tension (4vxn7pqm).
-      revisit-when: >
-        The first manual end-to-end smoke test of the daemon-backed notify
-        succeeds (planned for phase 2B post-push). At that point, capture
-        the exact sequence — create test bot, write config.toml, run
-        confer-daemon, send a notify — as the first env-var-gated integration
-        test under tests/integration/.
+      resolution: >
+        Resolved 2026-05-29. The first integration tier landed under
+        tests/integration/ as a CONFER_INTEGRATION=1-gated notify smoke test
+        (test_notify_smoke.py). It reuses the real bot credentials
+        (Settings.load() of the operator's actual config), copies them into a
+        throwaway temp config, and points the auto-spawned confer-daemon at
+        that temp file via CONFER_CONFIG (Config Path Override Via
+        CONFER_CONFIG, w3kq7nxp) with XDG_RUNTIME_DIR / XDG_STATE_HOME
+        isolated to a tmp dir so the test daemon's socket/pid/log never
+        collide with a real running daemon. The test asserts notify() returns
+        the "sent at <timestamp>" success sentinel; because serve() binds its
+        socket only AFTER wait_for_ready() (the Gateway is up before the
+        client can connect), a successful notify also proves
+        gateway_state == ready. The suite is SKIPPED (not failed) when the
+        integration flag or real config is absent, keeping it out of the
+        coverage gate per Integration Tests Exempt (gjx4m7p2) and out of the
+        default CI gate per Two-Layer Test Strategy (7vpm2qkx). The
+        "two-layer strategy is currently one layer" gap is now closed for the
+        notify path. The ask round-trip stays manual — a human reply cannot
+        be scripted — and Mock Depth (4vxn7pqm) is correspondingly narrowed
+        to the ask/check_messages surface. Running this tier in CI as a
+        scheduled upstream-API-drift canary (with Discord test-bot secrets)
+        is deliberately deferred as a separate opt-in decision, since forcing
+        it into the push/PR gate is exactly the flakiness Two-Layer Test
+        Strategy warns against.
+      resolved-by: dh, 2026-05-29
 
     NDJSON Input Size Unbounded = tension:
       id: 7pqkn4vx

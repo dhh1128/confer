@@ -145,6 +145,23 @@ uv run pytest    # runs the test suite with branch coverage (target: 100%)
 
 In this layout the console scripts are run through uv (`uv run confer-server`, `uv run confer`, etc.) rather than directly on PATH.
 
+### Test tiers
+
+The suite has three tiers. A plain `uv run pytest` runs only the first and is the gate that enforces 100% branch coverage; the other two hit real Discord, are coverage-exempt, and are opt-in so a normal run never needs credentials or a human.
+
+| Tier | What it covers | How to run |
+|------|----------------|------------|
+| **Unit** (default) | All production logic with the discord.py boundary mocked. The CI gate. | `uv run pytest` |
+| **Integration** | Live, automatable end-to-end paths against a real bot (notify success + failure, ask timeouts). Borrows your real config creds, spawns an isolated daemon. | `CONFER_INTEGRATION=1 uv run pytest --no-cov -m integration` |
+| **Interactive** | Inbound paths that need a human acting in Discord (a reply routed back through `ask`, an unsolicited DM surfacing via `check_messages`). | `uv run pytest --interactive -s --no-cov -m interactive` |
+
+Notes:
+
+- Both opt-in tiers need a working `~/.config/confer/config.toml` (they reuse your real bot identity); each test skips, rather than fails, when its gate is absent.
+- `--no-cov` is required for the opt-in tiers — a live test exercises only a sliver of the codebase, so the default `--cov-fail-under=100` would otherwise fail the run.
+- Interactive tests run serially and each prints an `ACTION REQUIRED` prompt, then wait up to 180s for you to act in Discord — watch the terminal and respond to each as it appears.
+- See `this.i` (`7vpm2qkx`, `5nqx7pmw`, `k4n7pqx2`, `gjx4m7p2`) for the full rationale behind the tiering.
+
 ## Releasing
 
 Releases are cut with `scripts/release.py`, which bumps the version in `pyproject.toml`, runs the test suite, commits (signed off), and pushes a `v<x.y.z>` tag. That tag triggers [`publish.yml`](.github/workflows/publish.yml), which builds and publishes confer to PyPI via trusted publishing.
