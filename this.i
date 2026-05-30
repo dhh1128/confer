@@ -2177,6 +2177,65 @@ Confer = goal:
         Left UNRESOLVED on purpose. Cross-reference eh7nqkp4, ax7nqp4k, and
         sq7nkp4x.
 
+    Stop Hook Re-Nudges After Agent Reaches Out = tension:
+      id: lp7nkq4x
+      nature: >
+        Bug found during the 2026-05-29 shakedown. The Stop hook's "already
+        reached out" loop guard (eh7nqkp4 layer b) is defeated essentially
+        every time. _confer_tool_used_since_last_user scans the transcript for
+        an mcp__confer__* tool_use AFTER the last line whose type == "user" —
+        intending "since the last human turn". But in the Claude Code JSONL
+        transcript a tool_RESULT is also recorded as a message with
+        type == "user" (verified directly: an assistant tool_use line is
+        followed by a type=="user" line carrying a tool_result content block).
+        So the agent's own notify/ask produces a tool_result that advances the
+        "last user" marker PAST the confer tool_use, the scan then finds no
+        confer call after it, and the hook concludes "hasn't reached out" and
+        nudges again — even though the agent just did. Observed: the agent sent
+        a clean notify, then on stop was told to notify AGAIN. Blast radius is
+        bounded (the stop_hook_active guard, layer a, still prevents an
+        infinite loop), so the symptom is one redundant nudge / a double DM,
+        not a hang — but it undermines the property that makes away mode
+        pleasant rather than nagging.
+      resolution: >
+        Resolved 2026-05-29. The guard must key off the last GENUINE human
+        prompt, not the last type=="user" line. A real human turn is a
+        type=="user" message whose content is NOT composed solely of
+        tool_result blocks (a human prompt carries text/other blocks; a
+        tool-result envelope carries only tool_result). _confer_tool_used_since_
+        last_user now finds the last such genuine-human message and scans after
+        it, so an agent's own tool_result no longer resets the window. Unit
+        tests reproduce the tool_result-as-user transcript shape across the
+        boundary. Fail-open behavior (eh7nqkp4) is unchanged: any
+        read/parse/shape ambiguity still returns True (treat as reached-out,
+        do not block).
+      resolved-by: dh, 2026-05-29
+
+    Hook Logging Leaks To Stderr As Stop Hook Error = tension:
+      id: hk7nqp4m
+      nature: >
+        Bug found during the 2026-05-29 shakedown. On WSL2, XDG_RUNTIME_DIR is
+        exported but /run/user/<uid> is not writable, so paths.py emits a
+        log.warning about falling back to XDG_STATE_HOME (correct, non-fatal
+        behavior). But the `confer hook stop` entrypoint never configures
+        logging, so Python's last-resort handler prints that WARNING to stderr
+        — and the Stop hook ALSO uses stderr to deliver its nudge (exit 2 +
+        stderr is the channel Claude Code feeds the model, eh7nqkp4). Claude
+        Code merges the two and labels the whole thing "Stop hook error",
+        making every hook invocation look like a failure when nothing failed;
+        in the shakedown the away agent even forwarded the warning to daniel as
+        a scary "diagnostic". The fallback itself is fine (pf4nqkx7 / paths.py);
+        only the noise on the hook's stderr is the problem.
+      resolution: >
+        Resolved 2026-05-29. The `confer hook` entrypoint silences logging
+        (raises the threshold above WARNING / attaches a null handler) before
+        invoking the hook logic, so the hook process emits ONLY its intended
+        stderr payload — the nudge text for stop, nothing for prompt. The
+        XDG-fallback warning is still available on the daemon/CLI paths that DO
+        configure logging; it is suppressed only on the hook hot path where its
+        sole effect was to masquerade as an error.
+      resolved-by: dh, 2026-05-29
+
     # ─── DISTRIBUTION ────────────────────────────────────────────────────────
 
     Distribute Via uv tool install = decision:
