@@ -1450,6 +1450,50 @@ Confer = goal:
         CONFER_INTEGRATION is also inherited by the spawned daemon subprocess
         (which the --interactive flag need not be).
 
+    Integration Freshness Gate = decision:
+      id: m4xq7npk
+      why: >
+        The integration tier (5nqx7pmw) only catches Discord / discord.py API
+        drift (Mock Depth, 4vxn7pqm) on the runs where someone actually types
+        CONFER_INTEGRATION=1 — realistically rare and easy to forget, so drift
+        could ship silently. This gate forces periodic live verification while
+        the code is actively evolving, WITHOUT putting live-Discord tests on
+        the push/PR gate (the flakiness Two-Layer Test Strategy, 7vpm2qkx,
+        explicitly warns against). Mechanism: a checked-in stamp file,
+        tests/integration/last-verified.txt, holds the ISO date the
+        integration tier last passed. A normal-suite test
+        (tests/test_integration_freshness.py) fails when that date is older
+        than MAX_AGE (62 days ≈ two months). The stamp is refreshed
+        automatically: a pytest_sessionfinish hook in tests/conftest.py writes
+        today's date whenever the integration tier actually ran AND the whole
+        session had zero failures (so a flaky/failed integration run never
+        refreshes it). scripts/stamp-integration.py is a manual escape hatch
+        for the same write, to be run only right after a green integration run.
+        SCOPE — the gate bites only a machine equipped to satisfy it: it skips
+        when CI is set (a scheduled CI run cannot be told to "go run live
+        Discord tests") and skips when no real confer config is present (a
+        no-creds contributor literally cannot run the integration tier, so
+        failing their `uv run pytest` would be hostile). For daniel, who always
+        has a config and runs locally, it is live. Determinism deviation: this
+        is deliberately a time-dependent test that will go red with the mere
+        passage of the calendar and zero code change — unusual for a test
+        suite, and it means re-running an old commit (e.g. under git bisect) on
+        an equipped machine can fail on freshness alone. Accepted: it is a
+        forcing function, not a correctness check, and the tight scope keeps
+        the blast radius to the maintainer's live checkout. Considered and
+        rejected: (a) a scheduled CI "drift-canary" workflow that stores a
+        Discord test-bot token in GitHub secrets and runs the integration tier
+        nightly — rejected for now because it pushes a real credential into
+        GitHub infra (against the no-data-leaves-the-machine stance) and pings
+        a real account on a cron, heavier than the problem warrants while the
+        repo is small; this lighter local gate gives most of the benefit at no
+        secret-exfiltration cost. (b) warn-only on staleness — rejected as too
+        easy to ignore; a hard fail is the point. (c) enforcing on every
+        non-CI machine regardless of creds — rejected as hostile to drive-by
+        contributors. The stamp helper logic lives in tests/freshness.py (not
+        under src/, so it is outside the 100% production-coverage gate); the
+        freshness test itself adds no production branches.
+
     # ─── OPEN TENSIONS ───────────────────────────────────────────────────────
 
     Pending Ask Lost On MCP Server Death = tension:
