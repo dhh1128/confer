@@ -161,7 +161,8 @@ Notes:
 - Both opt-in tiers need a working `~/.config/confer/config.toml` (they reuse your real bot identity); each test skips, rather than fails, when its gate is absent.
 - `--no-cov` is required for the opt-in tiers — a live test exercises only a sliver of the codebase, so the default `--cov-fail-under=100` would otherwise fail the run.
 - Interactive tests run serially and each prints an `ACTION REQUIRED` prompt, then wait up to 180s for you to act in Discord — watch the terminal and respond to each as it appears.
-- See `this.i` (`7vpm2qkx`, `c7nq4xkp`, `5nqx7pmw`, `k4n7pqx2`, `gjx4m7p2`) for the full rationale behind the tiering.
+- **Integration freshness gate.** Because the integration tier only catches Discord/discord.py API drift on the runs you remember to do, a default-suite test fails if the integration tier hasn't passed in the last ~2 months. It records the last green run in `tests/integration/last-verified.txt` (auto-refreshed when the integration tier passes; or run `python scripts/stamp-integration.py` by hand right after a green run, then commit it). The gate is scoped to a machine that can actually satisfy it — it skips under CI (`CI` env set) and when no real config is present — so it never ambushes contributors without Discord creds.
+- See `this.i` (`7vpm2qkx`, `c7nq4xkp`, `5nqx7pmw`, `k4n7pqx2`, `m4xq7npk`, `gjx4m7p2`) for the full rationale behind the tiering.
 
 ## Releasing
 
