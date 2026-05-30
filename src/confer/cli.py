@@ -21,7 +21,7 @@ import subprocess
 import sys
 import uuid
 
-from confer import hooks, integrations, presence
+from confer import awaytime, hooks, integrations, presence
 from confer.config import default_config_path
 from confer.paths import socket_path
 from confer.protocol import (
@@ -196,28 +196,118 @@ def _cmd_setup(
     return 0
 
 
-def _cmd_away(note: str | None) -> int:
-    presence.set_away(note)
-    msg = "confer: away mode ON — agents will reach you via Discord."
-    if note:
-        msg += f' (note: "{note}")'
-    print(msg)
-    return 0
+def _fmt_clock(epoch: float) -> str:
+    """HH:MM local for schedule display."""
+    from datetime import datetime
+
+    return datetime.fromtimestamp(epoch).strftime("%H:%M")
 
 
-def _cmd_back() -> int:
-    presence.set_present()
-    print("confer: away mode OFF — back at the keyboard.")
-    return 0
+def _parse_when(words: list[str]) -> tuple[str, str] | None:
+    """Parse a schedule phrase like ['in','5'] or ['at','1100'] into
+    ('in'|'at', value). Returns None for an empty phrase (= now). Raises
+    AwayTimeError on a malformed phrase."""
+    if not words:
+        return None
+    if len(words) != 2 or words[0] not in ("in", "at"):
+        raise awaytime.AwayTimeError(
+            f"expected 'in <minutes>' or 'at <HHMM>', got {' '.join(words)!r}"
+        )
+    return words[0], words[1]
 
 
-def _cmd_presence() -> int:
-    p = presence.read_presence()
-    if not p.away:
-        print("present")
+def _cmd_away(note: str | None, when: list[str]) -> int:
+    """away now | away in <min> | away at <HHMM>. The schedule forms add a
+    future activation (sq7nkp4x); bare away goes away immediately."""
+    try:
+        parsed = _parse_when(when)
+    except awaytime.AwayTimeError as exc:
+        print(f"confer: {exc}", file=sys.stderr)
+        return 2
+    if parsed is None:
+        presence.set_away(note)
+        msg = "confer: away mode ON — agents will reach you via Discord."
+        if note:
+            msg += f' (note: "{note}")'
+        print(msg)
         return 0
-    suffix = f' — note: "{p.note}"' if p.note else ""
-    print(f"away{suffix}")
+    kind, value = parsed
+    try:
+        at = (
+            awaytime.parse_in_minutes(value)
+            if kind == "in"
+            else awaytime.parse_at_clock(value)
+        )
+    except awaytime.AwayTimeError as exc:
+        print(f"confer: {exc}", file=sys.stderr)
+        return 2
+    presence.schedule_away(at, note)
+    suffix = f' (note: "{note}")' if note else ""
+    print(f"confer: away scheduled for {_fmt_clock(at)}{suffix}.")
+    return 0
+
+
+def _cmd_back(target: list[str]) -> int:
+    """back now | back at <HHMM> | back all."""
+    if not target:
+        presence.set_present()
+        print("confer: away mode OFF — back at the keyboard.")
+        return 0
+    if target == ["all"]:
+        presence.clear_all()
+        print("confer: cleared away mode and all scheduled aways.")
+        return 0
+    if len(target) == 2 and target[0] == "at":
+        try:
+            at = awaytime.parse_at_clock(target[1])
+        except awaytime.AwayTimeError as exc:
+            print(f"confer: {exc}", file=sys.stderr)
+            return 2
+        if presence.cancel_pending(at):
+            print(f"confer: cancelled the scheduled away at {_fmt_clock(at)}.")
+            return 0
+        # No match — report explicitly, list what is pending (sq7nkp4x).
+        pending = presence.read_presence().pending
+        if pending:
+            times = ", ".join(_fmt_clock(p.at) for p in pending)
+            print(
+                f"confer: no scheduled away at {_fmt_clock(at)}. "
+                f"Pending: {times}.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"confer: no scheduled away at {_fmt_clock(at)} "
+                "(nothing is scheduled).",
+                file=sys.stderr,
+            )
+        return 1
+    print(
+        f"confer: unrecognized 'back {' '.join(target)}'. "
+        "Use 'back', 'back at <HHMM>', or 'back all'.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _cmd_status() -> int:
+    """CLI-only reader (av7nkp4x): current state + the pending schedule."""
+    import time as _t
+
+    p = presence.read_presence()
+    now = _t.time()
+    if p.effective_away(now):
+        note = p.active_note(now)
+        suffix = f' — note: "{note}"' if note else ""
+        print(f"away{suffix}")
+    else:
+        print("present")
+    future = [pa for pa in p.pending if pa.at > now]
+    if future:
+        print("scheduled away:")
+        for pa in future:
+            note = f"  {pa.note}" if pa.note else ""
+            print(f"  {_fmt_clock(pa.at)}{note}")
     return 0
 
 
@@ -314,8 +404,9 @@ def _build_parser() -> argparse.ArgumentParser:
     away = sub.add_parser(
         "away",
         help=(
-            "Turn on away mode: every confer-aware session reaches you via "
-            "Discord instead of waiting at the terminal. Run from any window."
+            "Turn on away mode now, or schedule it: every confer-aware session "
+            "reaches you via Discord instead of waiting at the terminal. Run "
+            "from any window."
         ),
     )
     away.add_argument(
@@ -323,11 +414,30 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional note surfaced to agents (e.g. 'back after lunch').",
     )
-    sub.add_parser(
-        "back",
-        help="Turn off away mode (also happens automatically when you type).",
+    # Schedule forms are positional words ("away in 5", "away at 1100") so the
+    # slash commands can pass them through verbatim ($ARGUMENTS); av7nkp4x.
+    away.add_argument(
+        "when",
+        nargs="*",
+        help="Optional schedule: 'in <MIN>' or 'at <HHMM>'. Omit to go away "
+        "now.",
     )
-    sub.add_parser("presence", help="Print current presence (away/present).")
+    back = sub.add_parser(
+        "back",
+        help="Turn off away mode (also happens automatically when you type). "
+        "'back at HHMM' cancels one scheduled away; 'back all' clears "
+        "everything.",
+    )
+    back.add_argument(
+        "target",
+        nargs="*",
+        help="Optional: 'at <HHMM>' to cancel one scheduled away, or 'all' to "
+        "clear everything. Omit to become present now.",
+    )
+    sub.add_parser(
+        "status",
+        help="Print current away/present state and any scheduled aways.",
+    )
 
     hook = sub.add_parser(
         "hook",
@@ -358,11 +468,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "answer":
         return asyncio.run(_cmd_answer(args.text))
     if args.cmd == "away":
-        return _cmd_away(args.note)
+        return _cmd_away(args.note, args.when)
     if args.cmd == "back":
-        return _cmd_back()
-    if args.cmd == "presence":
-        return _cmd_presence()
+        return _cmd_back(args.target)
+    if args.cmd == "status":
+        return _cmd_status()
     if args.cmd == "hook":
         return _cmd_hook(args.event)
     if args.cmd == "install-hooks":

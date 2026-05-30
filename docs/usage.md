@@ -121,11 +121,46 @@ without retyping an instruction in each window. One command, run anywhere, flips
 that policy globally:
 
 ```bash
-confer away              # leaving — agents now reach you via confer
+confer away              # leaving now — agents reach you via confer
 confer away --note "back after lunch"
 confer back              # back at the keyboard (also happens automatically — see below)
-confer presence          # show current state
+confer status            # show current state + any scheduled aways
 ```
+
+### Scheduling away in advance
+
+You can arm away mode for a future time — handy when you know a meeting is
+coming but want to keep working until then. A keyboard prompt makes you present
+*now* but does **not** cancel a future scheduled away, so you can schedule first
+and keep typing:
+
+```bash
+confer away in 5         # go away 5 minutes from now
+confer away at 1100      # go away at 11:00 (24-hour; past time means tomorrow)
+confer away at 1400 --note "design review"
+```
+
+Scheduling is ephemeral and capped at 24 hours ahead (a time already past today
+is interpreted as tomorrow, which keeps everything within the window). It does
+not survive a reboot. Manage the schedule with:
+
+```bash
+confer status            # list current state + every pending away
+confer back at 1100      # cancel just the 11:00 scheduled away
+confer back all          # clear current away AND every scheduled away
+confer back              # become present now; future scheduled aways are kept
+```
+
+When a scheduled away activates, the daemon DMs you **"Now in away mode"** (with
+your note) — your confirmation that it engaged. That confirmation needs the
+daemon running at that moment; away *enforcement* itself does not (it's a file
+the Stop hook reads), so away still engages even if the daemon is down — you
+just won't get the buzz.
+
+The same forms work as slash commands inside Claude Code: `/away at 1100`,
+`/back all`, etc. (There is no `/status` — if you're typing in Claude you're at
+the keyboard and already present; `confer status` is for checking from a
+terminal while you're away.)
 
 This is enforced by two Claude Code hooks, installed once into `~/.claude`:
 

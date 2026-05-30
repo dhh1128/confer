@@ -1,7 +1,7 @@
 import json
 
 from confer import hooks
-from confer.presence import Presence
+from confer.presence import PendingAway, Presence
 
 
 def _jsonl(path, objs):
@@ -153,6 +153,40 @@ def test_stop_handles_messy_transcript(tmp_path):
     assert hooks.run_stop_hook(payload, presence=AWAY)[0] == 2
 
 
+def test_stop_allows_when_scheduled_away_not_yet_fired(tmp_path):
+    """A pending schedule that hasn't reached its time is not effective-away,
+    so the hook allows the stop (sq7nkp4x)."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [{"type": "user", "message": {"content": [
+        {"type": "text", "text": "hi"}]}}])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    pending = Presence(away=False, pending=(PendingAway(at=1000.0, note="mtg"),))
+    assert hooks.run_stop_hook(payload, presence=pending, now=999.0) == (0, "")
+
+
+def test_stop_blocks_with_fired_schedule_note(tmp_path):
+    """Once a scheduled entry's time arrives, the hook blocks and surfaces that
+    entry's note (active_note), even with no sticky away set."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [{"type": "user", "message": {"content": [
+        {"type": "text", "text": "hi"}]}}])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    pending = Presence(away=False, pending=(PendingAway(at=1000.0, note="standup"),))
+    code, msg = hooks.run_stop_hook(payload, presence=pending, now=1000.0)
+    assert code == 2 and "standup" in msg
+
+
+def test_stop_default_now_uses_wall_clock(tmp_path, monkeypatch):
+    """run_stop_hook with no now= reads the wall clock for effective-away."""
+    monkeypatch.setattr(hooks.time, "time", lambda: 5000.0)
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [{"type": "user", "message": {"content": [
+        {"type": "text", "text": "hi"}]}}])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    pending = Presence(away=False, pending=(PendingAway(at=4000.0),))  # fired by 5000
+    assert hooks.run_stop_hook(payload, presence=pending)[0] == 2
+
+
 def test_prompt_hook_clears_presence(tmp_path, monkeypatch):
     from confer import presence as presence_mod
     p = tmp_path / "confer.presence"
@@ -160,3 +194,16 @@ def test_prompt_hook_clears_presence(tmp_path, monkeypatch):
     presence_mod.set_away(now=1.0)
     assert hooks.run_prompt_hook() == 0
     assert not p.exists()
+
+
+def test_prompt_hook_preserves_future_pending(tmp_path, monkeypatch):
+    """Typing a prompt makes you present now but must NOT cancel a still-future
+    scheduled away (the ar7nqkp4 / sq7nkp4x invariant)."""
+    from confer import presence as presence_mod
+    p = tmp_path / "confer.presence"
+    monkeypatch.setattr(presence_mod, "presence_file", lambda: p)
+    monkeypatch.setattr(presence_mod.time, "time", lambda: 100.0)
+    presence_mod.schedule_away(at=9999.0, note="future mtg")
+    assert hooks.run_prompt_hook() == 0
+    pending = presence_mod.read_presence().pending
+    assert pending == (presence_mod.PendingAway(at=9999.0, note="future mtg"),)

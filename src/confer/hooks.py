@@ -12,6 +12,7 @@ Two hooks (registered globally by `confer install-hooks`, ii7nqkp4):
 """
 
 import json
+import time
 
 from confer.presence import Presence, read_presence, set_present
 
@@ -94,13 +95,18 @@ def _confer_tool_used_since_last_user(transcript_path: str) -> bool:
 
 
 def run_stop_hook(
-    stdin_text: str, *, presence: Presence | None = None
+    stdin_text: str,
+    *,
+    presence: Presence | None = None,
+    now: float | None = None,
 ) -> tuple[int, str]:
     """Return (exit_code, stderr_text). (2, reason) blocks the stop and feeds
-    `reason` to the model; (0, "") allows it. `presence` is injectable for
-    tests; defaults to a fresh read."""
+    `reason` to the model; (0, "") allows it. `presence`/`now` are injectable
+    for tests; default to a fresh read and wall-clock. Uses EFFECTIVE-away
+    (sticky OR a fired scheduled entry, sq7nkp4x), not just the sticky flag."""
+    when = time.time() if now is None else now
     presence = read_presence() if presence is None else presence
-    if not presence.away:
+    if not presence.effective_away(when):
         return (0, "")
     try:
         data = json.loads(stdin_text)
@@ -115,12 +121,15 @@ def run_stop_hook(
         return (0, "")
     if _confer_tool_used_since_last_user(transcript_path):
         return (0, "")
-    note = f" — {presence.note}" if presence.note else ""
+    active_note = presence.active_note(when)
+    note = f" — {active_note}" if active_note else ""
     return (2, _AWAY_REASON.format(note=note))
 
 
 def run_prompt_hook() -> int:
     """UserPromptSubmit side effect: the user is typing here, so they are back
-    everywhere. Always allow the prompt (exit 0)."""
+    everywhere. Clears sticky away and any already-fired schedule entry, but
+    leaves still-pending future entries (ar7nqkp4 / sq7nkp4x). Always allow the
+    prompt (exit 0)."""
     set_present()
     return 0
