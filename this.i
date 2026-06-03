@@ -2361,6 +2361,16 @@ Confer = goal:
         a supply-chain policy is adopted. Likely fix: pin each action to a
         full commit SHA with a version comment, and let dependabot (DEV-F2,
         now configured) bump the pins.
+      resolution: >
+        Resolved by Pin CI Actions To Commit SHAs (shp4nqx7), 2026-06-03. Every
+        `uses:` in ci.yml and publish.yml is pinned to a full 40-hex commit SHA
+        (resolved authoritatively via git ls-remote against the upstream repo)
+        with a trailing `# vN` comment; persist-credentials: false is set on
+        checkout; and the dependabot github-actions ecosystem entry is grouped
+        so SHA+comment bumps arrive as one PR. (copilot-review-gate.yml has no
+        `uses:` references — it shells out to gh/jq only — so nothing to pin
+        there.)
+      resolved-by: daniel, 2026-06-03
 
     No Secret-Scanning Gate = tension:
       id: ss4kqnv7
@@ -2369,6 +2379,11 @@ Confer = goal:
         secrets or invisible-Unicode payloads, so an accidental token commit
         or a hidden-character injection would not be caught automatically —
         notable for a tool that holds a Discord bot token.
+      partial-resolution: >
+        The invisible-Unicode half is resolved by Invisible-Unicode CI Gate
+        (uc7nqx4p), 2026-06-03: scripts/check_unicode.py runs as a CI job and
+        rejects the GlassWorm / Trojan-Source character classes. The
+        secret-scanning (gitleaks-or-equivalent) half remains OPEN.
       revisit-when: >
         A near-miss occurs, OR the project gains external contributors. Likely
         fix: a gitleaks (or equivalent) CI step and a pre-commit hook addition.
@@ -2401,6 +2416,79 @@ Confer = goal:
         enough to confuse in practice. Likely fix: a thread-specific bounce
         ("that thread is no longer open") when a tag-shaped token matches no
         active thread.
+
+    # ─── SUPPLY-CHAIN HARDENING (2026-06-03) ─────────────────────────────────
+    # A portable supply-chain hardening pass against the dominant 2026 attack
+    # classes: GlassWorm / Trojan-Source (invisible & bidi Unicode), mutable-tag
+    # GitHub Actions (tj-actions / Megalodon), and PATH/binary hijack. Each fix
+    # is minimal and non-breaking; the operational controls that need owner/admin
+    # rights (branch protection, token scoping, secret-scanning push protection)
+    # are recommended to daniel out-of-band, not applied here.
+
+    Invisible-Unicode CI Gate = decision:
+      id: uc7nqx4p
+      why: >
+        Add a stdlib-Python scanner (scripts/check_unicode.py) wired into CI as
+        its own job that rejects ONLY the dangerous Unicode categories — bidi
+        controls (U+202A–202E, U+2066–2069), directional marks (U+200E/200F/
+        061C), zero-width / invisible code points (U+200B–200D, U+2060, U+FEFF,
+        U+00AD), variation selectors (U+FE00–FE0F, U+E0100–E01EF), tag chars
+        (U+E0000–E007F), and Private Use Areas. These defeat human review by
+        rendering as nothing (GlassWorm) or reordering how source reads vs. how
+        it executes (Trojan Source), so an automated gate is the only defense.
+        A naive ASCII-only rule was REJECTED: confer's this.i and docs
+        deliberately use em-dashes, arrows, and box-drawing rules, and the gate
+        must not flag honest non-ASCII. Stdlib Python (zero new dependency, ships
+        on GitHub runners) was chosen over an ESLint/cargo native lint because
+        confer is Python and the same script doubles as a local/pre-commit check.
+        Resolves the invisible-Unicode half of No Secret-Scanning Gate
+        (ss4kqnv7); the secret-scanning (gitleaks) half stays open there. The
+        scanner lives under scripts/ — outside the confer package — so it sits
+        outside the 100% production-coverage gate (like tests/freshness.py), but
+        carries its own test (tests/test_check_unicode.py) that plants a
+        dangerous code point via chr() escapes (never a literal invisible
+        character) and asserts honest glyphs pass.
+      approved-by: daniel, 2026-06-03
+
+    Pin CI Actions To Commit SHAs = decision:
+      id: shp4nqx7
+      why: >
+        Pin every GitHub Actions `uses:` reference to a full 40-hex commit SHA
+        with a trailing `# vN` comment, resolved authoritatively from upstream
+        (git ls-remote / gh api — never from memory), rather than a mutable tag
+        (@v6, @v7) or branch (@release/v1). A mutable tag/branch can be silently
+        retargeted to malicious code (the tj-actions / Megalodon class); a SHA
+        cannot. The pinned releases were also checked to run on the node24
+        action runtime (checkout v6.0.3, setup-uv v7.6.0; gh-action-pypi-publish
+        is a composite action), avoiding the deprecated-node20 warning. Set
+        persist-credentials: false on checkout so the job's GITHUB_TOKEN is not
+        left in the checkout's git config for later steps. The dependabot
+        github-actions ecosystem entry is grouped (groups.actions.patterns
+        ["*"]) so SHA+comment bumps arrive as a single PR and the pins stay
+        current without manual drift. Resolves CI Actions Not SHA-Pinned
+        (aq4nvx7p).
+      approved-by: daniel, 2026-06-03
+
+    Resolve External CLI Binaries To Absolute Paths = decision:
+      id: bpr7nqx4
+      why: >
+        At each site that spawns an external CLI by bare name, resolve the name
+        to an absolute path via shutil.which and invoke the resolved path.
+        confer-daemon (_spawn_daemon) and claude (_register_with_claude) already
+        resolved the path — _spawn_daemon even LOGGED it "so a PATH-shadow attack
+        is visible in retrospect" — but then discarded it and re-spawned the bare
+        name, so the binary actually exec'd could differ from the one resolved
+        and logged (a PATH-hijack window, and the retrospect log was misleading).
+        git (_detect_repo_and_branch) is resolved the same way for consistency.
+        Where the name does not resolve, fall back to the bare name: an
+        unresolvable name has nothing on PATH to substitute, and all three sites
+        already degrade gracefully (daemon spawn fails as before, claude prints
+        the manual command, git falls back to a detached label). No shell=True
+        and no string-concatenated commands are introduced — every call stays
+        argument-vector form. scripts/release.py (a maintainer-only local script
+        that shells out to bare `git`) is intentionally left as-is: it is not
+        runtime/shipped code and runs only in daniel's trusted shell.
+      approved-by: daniel, 2026-06-03
 
     # ─── PROMPT AUDIT HISTORY ────────────────────────────────────────────────
 
