@@ -1450,6 +1450,50 @@ Confer = goal:
         CONFER_INTEGRATION is also inherited by the spawned daemon subprocess
         (which the --interactive flag need not be).
 
+    Integration Freshness Gate = decision:
+      id: m4xq7npk
+      why: >
+        The integration tier (5nqx7pmw) only catches Discord / discord.py API
+        drift (Mock Depth, 4vxn7pqm) on the runs where someone actually types
+        CONFER_INTEGRATION=1 — realistically rare and easy to forget, so drift
+        could ship silently. This gate forces periodic live verification while
+        the code is actively evolving, WITHOUT putting live-Discord tests on
+        the push/PR gate (the flakiness Two-Layer Test Strategy, 7vpm2qkx,
+        explicitly warns against). Mechanism: a checked-in stamp file,
+        tests/integration/last-verified.txt, holds the ISO date the
+        integration tier last passed. A normal-suite test
+        (tests/test_integration_freshness.py) fails when that date is older
+        than MAX_AGE (62 days ≈ two months). The stamp is refreshed
+        automatically: a pytest_sessionfinish hook in tests/conftest.py writes
+        today's date whenever the integration tier actually ran AND the whole
+        session had zero failures (so a flaky/failed integration run never
+        refreshes it). scripts/stamp-integration.py is a manual escape hatch
+        for the same write, to be run only right after a green integration run.
+        SCOPE — the gate bites only a machine equipped to satisfy it: it skips
+        when CI is set (a scheduled CI run cannot be told to "go run live
+        Discord tests") and skips when no real confer config is present (a
+        no-creds contributor literally cannot run the integration tier, so
+        failing their `uv run pytest` would be hostile). For daniel, who always
+        has a config and runs locally, it is live. Determinism deviation: this
+        is deliberately a time-dependent test that will go red with the mere
+        passage of the calendar and zero code change — unusual for a test
+        suite, and it means re-running an old commit (e.g. under git bisect) on
+        an equipped machine can fail on freshness alone. Accepted: it is a
+        forcing function, not a correctness check, and the tight scope keeps
+        the blast radius to the maintainer's live checkout. Considered and
+        rejected: (a) a scheduled CI "drift-canary" workflow that stores a
+        Discord test-bot token in GitHub secrets and runs the integration tier
+        nightly — rejected for now because it pushes a real credential into
+        GitHub infra (against the no-data-leaves-the-machine stance) and pings
+        a real account on a cron, heavier than the problem warrants while the
+        repo is small; this lighter local gate gives most of the benefit at no
+        secret-exfiltration cost. (b) warn-only on staleness — rejected as too
+        easy to ignore; a hard fail is the point. (c) enforcing on every
+        non-CI machine regardless of creds — rejected as hostile to drive-by
+        contributors. The stamp helper logic lives in tests/freshness.py (not
+        under src/, so it is outside the 100% production-coverage gate); the
+        freshness test itself adds no production branches.
+
     # ─── OPEN TENSIONS ───────────────────────────────────────────────────────
 
     Pending Ask Lost On MCP Server Death = tension:
@@ -1790,9 +1834,12 @@ Confer = goal:
         "tools an agent may choose to use" to "a presence mode the human
         toggles." Latency inherits Confer's 2-3 min target (k7m3pq2x). The
         feature is realized by the decisions below: presence storage
-        (pf4nqkx7), a toggle surface (tg7nqkp4), Stop-hook enforcement
-        (eh7nqkp4), auto-return on keyboard input (ar7nqkp4), and an explicit
-        installer (ii7nqkp4).
+        (pf4nqkx7), a toggle surface (tg7nqkp4, superseded by the away/back/
+        status surface av7nkp4x), Stop-hook enforcement (eh7nqkp4), auto-return
+        on keyboard input (ar7nqkp4), and an explicit installer (ii7nqkp4).
+        Extended with scheduled away transitions (sq7nkp4x) so daniel can
+        pre-arm away mode for known-future meetings, with an activation notice
+        (cs7nkp4x) confirming each transition.
 
     Presence As A Workstation File = decision:
       id: pf4nqkx7
@@ -1820,10 +1867,30 @@ Confer = goal:
         isolation was never the obstacle. A daemon flag can still be added
         later if the daemon itself ever needs presence-aware behavior.
 
-    Toggle Surface confer away/back/presence = decision:
+        REFINED by Scheduled Away Transitions (sq7nkp4x): the presence file is
+        no longer a single binary fact (present/away) but current-state PLUS a
+        small bounded queue of future away activations. The robustness argument
+        above is preserved intact — the ENFORCEMENT read ("am I effectively
+        away right now?") is still a pure function of the file plus the clock
+        (effective-away = sticky-away OR any pending activation whose time has
+        arrived), so the global Stop hook still does a dependency-free file
+        stat with no daemon round-trip. Only the optional activation NOTICE
+        (cs7nkp4x) needs a running daemon, and that is explicitly best-effort.
+
+    Toggle Surface confer away/back/status = decision:
       id: tg7nqkp4
       why: >
-        The toggle is three `confer` CLI subcommands — `confer away [--note]`,
+        SUPERSEDED by Away Back Status Command Surface (av7nkp4x), which keeps
+        the file-writes-shared-state-from-any-window core of this decision but
+        (1) replaces the binary `confer presence` reader with `confer status`
+        (a reader is a distinct verb from the away/back mutators — say what you
+        mean), (2) makes `status` CLI-ONLY (a slash command only exists inside
+        a session, where you are by definition at the keyboard and already know
+        you are present, so an in-Claude status query is meaningless), and (3)
+        adds the scheduling forms (away in/at, back at/all) of sq7nkp4x. The
+        original rationale retained below for lineage.
+
+        The toggle is `confer` CLI subcommands — `confer away [--note]`,
         `confer back`, `confer presence` — that read/write the presence file
         (pf4nqkx7) directly and never touch the daemon. One command from any
         window (or `! confer away` inside a session) flips global state.
@@ -1876,6 +1943,16 @@ Confer = goal:
         explicit `confer back` always: rejected as needless friction given the
         keyboard signal is unambiguous and free.
 
+        REFINED by Scheduled Away Transitions (sq7nkp4x): with a schedule
+        present, "typing == confer back" is made precise — a keyboard prompt
+        clears the CURRENT away and any already-FIRED schedule entry, but does
+        NOT cancel still-PENDING future activations. This is the invariant that
+        makes prompt-first ordering safe: daniel can schedule `away at 1100`,
+        then keep typing into sessions, and the 11:00 activation still fires.
+        The UserPromptSubmit hook therefore performs the same operation as bare
+        `confer back` (present-now, pending-survive), not a full schedule wipe
+        (that is `confer back all`).
+
     Integrations Installed Explicitly = decision:
       id: ii7nqkp4
       why: >
@@ -1890,6 +1967,274 @@ Confer = goal:
         the hook runs regardless of the hook process's PATH. This composes with
         confer setup Subcommand (st7nqkp4). Considered auto-installing during
         `confer setup`: rejected — global-harness mutation must be opt-in.
+
+    Scheduled Away Transitions = decision:
+      id: sq7nkp4x
+      why: >
+        Away mode gains a bounded schedule of FUTURE activations, so daniel can
+        say in advance "go away at 11:00" and "go away at 14:00" (meetings he
+        knows about hours ahead) without remembering to do it at the moment.
+        This exists to kill a fragility he hit directly: the only way to enter
+        away "around" a task was to toggle it AFTER prompting (because a
+        keyboard prompt clears away, ar7nqkp4) — an order-dependent ritual that
+        is easy to get wrong. A pre-scheduled activation removes the ordering
+        problem entirely: schedule first, work freely, away lands on time.
+
+        State model. Presence (pf4nqkx7) becomes: a current sticky-away flag
+        (with optional note + since) PLUS a list of pending entries, each an
+        activation epoch + optional note. EFFECTIVE-AWAY, the only thing the
+        Stop hook (eh7nqkp4) cares about, is a pure function of file + clock:
+        sticky-away is true, OR some pending entry's time has arrived. So the
+        hot-path read stays a dependency-free file stat — the robustness
+        property of pf4nqkx7 is deliberately preserved. When a pending entry's
+        time arrives it is "fired": from that instant effective-away is true;
+        the entry can then be retired into the sticky-away flag (carrying its
+        note) the next time any writer touches the file, or simply remain in
+        the list as an arrived entry — both yield the same effective-away, and
+        the activation notice (cs7nkp4x) handles the user-visible signal.
+
+        Time inputs (av7nkp4x covers the command words): `at <HHMM>` means that
+        clock time today, or — if it has already passed — the same time
+        TOMORROW. This single rule gives the 24h cap for free: tomorrow-at-an-
+        earlier-clock-time is by definition under 24h out, and no input can
+        name a moment more than 24h ahead. Deliberately NOT a general calendar:
+        no dates, no recurrence, nothing beyond 24h, no persistence across a
+        reboot (XDG_RUNTIME_DIR clears — consistent with pf4nqkx7's "reboot
+        means present"). This is an ephemeral same-day/overnight convenience,
+        not a standing away calendar — daniel explicitly does not want a
+        permanent schedule.
+
+        Cancellation semantics (the `back` verbs, surfaced in av7nkp4x):
+        - bare `back` / typing a prompt: become present NOW. Clears sticky-away
+          and discards any already-FIRED entry, but LEAVES pending future
+          entries (the ar7nqkp4 invariant). So typing at 10:50 makes you
+          present; an 11:00 entry still fires.
+        - `back at <HHMM>`: cancel the one PENDING entry matching that time. If
+          none matches (typo, or it already fired), say so explicitly and list
+          what is pending — never a silent no-op.
+        - `back all`: the big hammer — clear current away AND wipe the entire
+          pending queue (clean slate).
+        Considered making typing wipe the whole schedule (consistent with the
+        old binary clear): rejected — it would re-introduce the exact ordering
+        fragility this feature removes, since the task prompt would cancel the
+        away you just scheduled.
+
+    Away Back Status Command Surface = decision:
+      id: av7nkp4x
+      why: >
+        The user-facing surface is two MUTATORS and one READER, named so each
+        word says exactly what it does:
+          away   (enter away)   — now | `in <min>` | `at <HHMM>` ; optional --note
+          back   (leave/cancel) — now | `at <HHMM>` | `all`
+          status (report)       — current state + the pending schedule
+        `away` and `back` are imperatives that change state; `status` only
+        reads. They are kept separate verbs precisely because overloading a
+        mutator to also answer "what is my state?" muddies meaning — an earlier
+        draft folded the query into `away when`, rejected for that reason.
+        Immediate `away` is the `in 0` / activate-now case, so the existing
+        zero-arg behavior is unchanged and backward compatible.
+
+        Surface split by reachability: `/away` and `/back` are installed as
+        slash commands (in-Claude) AND exist as CLI subcommands; `status` is
+        CLI-ONLY. Rationale: a slash command only exists inside a Claude
+        session, and if daniel is typing inside Claude he is at the keyboard
+        and therefore present — an in-session status query is meaningless. He
+        needs status exactly when he is AWAY from Claude, which is the terminal
+        (`confer status`). So no `/status` slash command and no status.md is
+        written by ii7nqkp4; the installer continues to emit only away.md and
+        back.md. The slash commands remain thin wrappers that pass their
+        arguments through to the CLI (so `/away at 1100` works), keeping the
+        CLI the single source of behavior (tg7nqkp4 lineage).
+
+        `confer status` output shows the current state on the first line
+        (present, or away with note) followed by any scheduled activations with
+        their times and notes; empty schedule prints just the current state.
+
+    Away Activation Notice = decision:
+      id: cs7nkp4x
+      why: >
+        When a scheduled away (sq7nkp4x) transitions from pending to active,
+        daniel gets a Discord DM — "confer: Now in away mode" plus the entry's
+        note if any — so he has positive confirmation it engaged. This is the
+        signal he asked for, and the DM (not a terminal print) is the right
+        channel because by activation time he has walked away from the keyboard;
+        the phone is where he is looking. It also doubles as a free liveness
+        check of the Discord path. Mechanism: a lightweight presence-watch task
+        in the daemon polls the presence file on a coarse cadence (~15s, well
+        inside the 2-3 min latency target k7m3pq2x) and, on observing a
+        pending→active transition it has not yet announced, sends the DM and
+        records that it announced it (in-memory). At-most-once is best-effort,
+        not guaranteed (see deviation nd7nkp4x). Considered firing the DM from
+        the CLI/hook write path instead of the daemon: rejected — the
+        transition happens at a wall-clock TIME with nothing necessarily
+        executing then (the whole point is daniel is not interacting), so only
+        a running watcher can observe it; the CLI that SCHEDULED it exited
+        minutes earlier.
+
+      children:
+
+        Activation Notice Requires Live Daemon = deviation:
+          id: nd7nkp4x
+          deviates-from: cs7nkp4x
+          scope: >
+            The pending→active activation DM (cs7nkp4x) is delivered only if
+            the daemon is running at the activation time, and is at-most-once
+            only within a single daemon lifetime — a daemon restart around the
+            transition may drop the notice, or (less likely) re-announce once.
+          why: >
+            Unlike away ENFORCEMENT, which is a daemon-independent file stat on
+            the Stop-hook hot path (pf4nqkx7 / sq7nkp4x) and so always works,
+            the activation NOTICE is an active push that intrinsically needs a
+            live watcher at a specific wall-clock moment. Guaranteeing it would
+            require durable, restart-surviving delivery state and a wakeup
+            mechanism — disproportionate for a convenience confirmation whose
+            absence costs only that daniel does not get a "you are now away"
+            buzz (away still correctly engages regardless). Accepted as
+            best-effort; the enforcement guarantee is the one that matters and
+            is unaffected.
+          approved-by: daniel, 2026-05-29
+
+    Away State Not Observable Mid-Turn = tension:
+      id: ax7nqp4k
+      nature: >
+        A live experiment tried to have the agent PROBE whether away mode was
+        active during its turn — via check_messages, the return value of a
+        notify call, and listMcpResources — and could not. This is structurally
+        impossible by current design, not a bug: away mode is enforced ONLY by
+        the global Stop hook at turn-end (eh7nqkp4); there is no MCP tool or
+        resource that exposes away-state, so listMcpResources returned empty and
+        a successful notify does not reveal the mode. The agent behaved
+        correctly and hedged honestly about not knowing. The consequence to
+        record: any test, prompt, or workflow that assumes the agent can query
+        away-state mid-turn cannot work against the current architecture — the
+        only observable manifestation of away mode is the stop-time nudge
+        itself. See the design fork (vk7nqp4x) for whether to change this; cross-
+        reference eh7nqkp4.
+
+    Queued Away Slash Command Never Fires And Is Unsafe = tension:
+      id: bz7nkp4q
+      nature: >
+        In Claude Code, a slash command typed while the agent is mid-turn does
+        not execute then — it sits in the input queue and fires only AFTER the
+        turn completes. In the experiment the agent never completed its turn
+        (long sleep plus probing, effectively stuck), so a `/away` typed to arm
+        away mode stayed pending the entire ~4 minutes and never set away mode at
+        all. This is Claude Code harness behavior, not a confer bug, but it means
+        `/away` cannot be relied on to arm away mode while an agent is working.
+        WORSE, it is a latent SAFETY hazard: a queued `/away` that finally
+        dequeues AFTER daniel has typed a return prompt (which set him present
+        via ar7nqkp4) would silently flip him back to away while he is actually
+        present at the keyboard. This is strong motivation for arming away from
+        an EXTERNAL shell (or via scheduled-away, sq7nkp4x) rather than an
+        in-session slash command, and is direct evidence that the manual
+        prompt-driven toggle ordering is inherently fragile. Cross-reference
+        ar7nqkp4 and sq7nkp4x.
+
+    Correct Manual Away-Test Procedure = tension:
+      id: dm7nkp4r
+      nature: >
+        Recorded as intent so the experiment procedure is not re-derived wrongly
+        next time. Because typing a prompt into the Claude session fires the
+        UserPromptSubmit hook and clears presence to present (ar7nqkp4), you
+        CANNOT arm-away-then-type-the-task — the task prompt would immediately
+        cancel the away you just set. The only ordering that works with the
+        current code is: (1) type the short task into the session — this must be
+        the LAST keyboard action in that session; (2) let the agent start
+        working; (3) from an EXTERNAL shell run `confer away` while the agent is
+        mid-turn, where nothing clears it; (4) do not touch that session's
+        keyboard again; (5) the agent finishes, tries to stop, and the Stop hook
+        fires the nudge — THIS nudge is the entire observable behavior of away
+        mode; (6) return deliberately via a prompt or `confer back`. A LONG
+        teed-up task actually HIDES the effect, because the agent never tries to
+        stop and so the Stop hook never fires. This fragility is exactly what
+        scheduled-away (sq7nkp4x, whose "typing does not cancel a pending entry"
+        invariant removes the ordering dependence) exists to eliminate.
+
+    Should Away-State Be Made Agent-Visible = tension:
+      id: vk7nqp4x
+      nature: >
+        OPEN DESIGN FORK — unresolved, for daniel to decide later, adjacent to
+        the scheduled-away work. The experiment assumed away-state should be
+        queryable by the agent; today it deliberately is not (ax7nqp4k). There
+        are two legitimate paths.
+
+        EXPOSE it: make away-state agent-visible — e.g. as an MCP resource, or
+        folded into the check_messages return value, or surfaced in tool
+        descriptions — so the agent can SEE the mode and proactively adapt
+        (prefer ask/notify, batch its reporting differently, avoid idling)
+        rather than only being reactively nudged at stop-time. Upside: the agent
+        cooperates with the policy instead of being caught by the hook after the
+        fact; mid-turn behavior can improve.
+
+        KEEP it invisible (the current hook-only design, eh7nqkp4): away mode is
+        a human-side POLICY enforced by the harness, not a fact the agent should
+        reason about. Upside: making it agent-visible invites agents to reason
+        about — and potentially around — the mode, adds MCP surface, and couples
+        agent behavior to a workstation-locality fact (pf4nqkx7) the agent has
+        no business depending on. The Stop hook already guarantees the behavior
+        without the agent knowing why.
+
+        Left UNRESOLVED on purpose. Cross-reference eh7nqkp4, ax7nqp4k, and
+        sq7nkp4x.
+
+    Stop Hook Re-Nudges After Agent Reaches Out = tension:
+      id: lp7nkq4x
+      nature: >
+        Bug found during the 2026-05-29 shakedown. The Stop hook's "already
+        reached out" loop guard (eh7nqkp4 layer b) is defeated essentially
+        every time. _confer_tool_used_since_last_user scans the transcript for
+        an mcp__confer__* tool_use AFTER the last line whose type == "user" —
+        intending "since the last human turn". But in the Claude Code JSONL
+        transcript a tool_RESULT is also recorded as a message with
+        type == "user" (verified directly: an assistant tool_use line is
+        followed by a type=="user" line carrying a tool_result content block).
+        So the agent's own notify/ask produces a tool_result that advances the
+        "last user" marker PAST the confer tool_use, the scan then finds no
+        confer call after it, and the hook concludes "hasn't reached out" and
+        nudges again — even though the agent just did. Observed: the agent sent
+        a clean notify, then on stop was told to notify AGAIN. Blast radius is
+        bounded (the stop_hook_active guard, layer a, still prevents an
+        infinite loop), so the symptom is one redundant nudge / a double DM,
+        not a hang — but it undermines the property that makes away mode
+        pleasant rather than nagging.
+      resolution: >
+        Resolved 2026-05-29. The guard must key off the last GENUINE human
+        prompt, not the last type=="user" line. A real human turn is a
+        type=="user" message whose content is NOT composed solely of
+        tool_result blocks (a human prompt carries text/other blocks; a
+        tool-result envelope carries only tool_result). _confer_tool_used_since_
+        last_user now finds the last such genuine-human message and scans after
+        it, so an agent's own tool_result no longer resets the window. Unit
+        tests reproduce the tool_result-as-user transcript shape across the
+        boundary. Fail-open behavior (eh7nqkp4) is unchanged: any
+        read/parse/shape ambiguity still returns True (treat as reached-out,
+        do not block).
+      resolved-by: dh, 2026-05-29
+
+    Hook Logging Leaks To Stderr As Stop Hook Error = tension:
+      id: hk7nqp4m
+      nature: >
+        Bug found during the 2026-05-29 shakedown. On WSL2, XDG_RUNTIME_DIR is
+        exported but /run/user/<uid> is not writable, so paths.py emits a
+        log.warning about falling back to XDG_STATE_HOME (correct, non-fatal
+        behavior). But the `confer hook stop` entrypoint never configures
+        logging, so Python's last-resort handler prints that WARNING to stderr
+        — and the Stop hook ALSO uses stderr to deliver its nudge (exit 2 +
+        stderr is the channel Claude Code feeds the model, eh7nqkp4). Claude
+        Code merges the two and labels the whole thing "Stop hook error",
+        making every hook invocation look like a failure when nothing failed;
+        in the shakedown the away agent even forwarded the warning to daniel as
+        a scary "diagnostic". The fallback itself is fine (pf4nqkx7 / paths.py);
+        only the noise on the hook's stderr is the problem.
+      resolution: >
+        Resolved 2026-05-29. The `confer hook` entrypoint silences logging
+        (raises the threshold above WARNING / attaches a null handler) before
+        invoking the hook logic, so the hook process emits ONLY its intended
+        stderr payload — the nudge text for stop, nothing for prompt. The
+        XDG-fallback warning is still available on the daemon/CLI paths that DO
+        configure logging; it is suppressed only on the hook hot path where its
+        sole effect was to masquerade as an error.
+      resolved-by: dh, 2026-05-29
 
     # ─── DISTRIBUTION ────────────────────────────────────────────────────────
 
@@ -2016,6 +2361,16 @@ Confer = goal:
         a supply-chain policy is adopted. Likely fix: pin each action to a
         full commit SHA with a version comment, and let dependabot (DEV-F2,
         now configured) bump the pins.
+      resolution: >
+        Resolved by Pin CI Actions To Commit SHAs (shp4nqx7), 2026-06-03. Every
+        `uses:` in ci.yml and publish.yml is pinned to a full 40-hex commit SHA
+        (resolved authoritatively via git ls-remote against the upstream repo)
+        with a trailing `# vN` comment; persist-credentials: false is set on
+        checkout; and the dependabot github-actions ecosystem entry is grouped
+        so SHA+comment bumps arrive as one PR. (copilot-review-gate.yml has no
+        `uses:` references — it shells out to gh/jq only — so nothing to pin
+        there.)
+      resolved-by: daniel, 2026-06-03
 
     No Secret-Scanning Gate = tension:
       id: ss4kqnv7
@@ -2024,6 +2379,11 @@ Confer = goal:
         secrets or invisible-Unicode payloads, so an accidental token commit
         or a hidden-character injection would not be caught automatically —
         notable for a tool that holds a Discord bot token.
+      partial-resolution: >
+        The invisible-Unicode half is resolved by Invisible-Unicode CI Gate
+        (uc7nqx4p), 2026-06-03: scripts/check_unicode.py runs as a CI job and
+        rejects the GlassWorm / Trojan-Source character classes. The
+        secret-scanning (gitleaks-or-equivalent) half remains OPEN.
       revisit-when: >
         A near-miss occurs, OR the project gains external contributors. Likely
         fix: a gitleaks (or equivalent) CI step and a pre-commit hook addition.
@@ -2056,6 +2416,79 @@ Confer = goal:
         enough to confuse in practice. Likely fix: a thread-specific bounce
         ("that thread is no longer open") when a tag-shaped token matches no
         active thread.
+
+    # ─── SUPPLY-CHAIN HARDENING (2026-06-03) ─────────────────────────────────
+    # A portable supply-chain hardening pass against the dominant 2026 attack
+    # classes: GlassWorm / Trojan-Source (invisible & bidi Unicode), mutable-tag
+    # GitHub Actions (tj-actions / Megalodon), and PATH/binary hijack. Each fix
+    # is minimal and non-breaking; the operational controls that need owner/admin
+    # rights (branch protection, token scoping, secret-scanning push protection)
+    # are recommended to daniel out-of-band, not applied here.
+
+    Invisible-Unicode CI Gate = decision:
+      id: uc7nqx4p
+      why: >
+        Add a stdlib-Python scanner (scripts/check_unicode.py) wired into CI as
+        its own job that rejects ONLY the dangerous Unicode categories — bidi
+        controls (U+202A–202E, U+2066–2069), directional marks (U+200E/200F/
+        061C), zero-width / invisible code points (U+200B–200D, U+2060, U+FEFF,
+        U+00AD), variation selectors (U+FE00–FE0F, U+E0100–E01EF), tag chars
+        (U+E0000–E007F), and Private Use Areas. These defeat human review by
+        rendering as nothing (GlassWorm) or reordering how source reads vs. how
+        it executes (Trojan Source), so an automated gate is the only defense.
+        A naive ASCII-only rule was REJECTED: confer's this.i and docs
+        deliberately use em-dashes, arrows, and box-drawing rules, and the gate
+        must not flag honest non-ASCII. Stdlib Python (zero new dependency, ships
+        on GitHub runners) was chosen over an ESLint/cargo native lint because
+        confer is Python and the same script doubles as a local/pre-commit check.
+        Resolves the invisible-Unicode half of No Secret-Scanning Gate
+        (ss4kqnv7); the secret-scanning (gitleaks) half stays open there. The
+        scanner lives under scripts/ — outside the confer package — so it sits
+        outside the 100% production-coverage gate (like tests/freshness.py), but
+        carries its own test (tests/test_check_unicode.py) that plants a
+        dangerous code point via chr() escapes (never a literal invisible
+        character) and asserts honest glyphs pass.
+      approved-by: daniel, 2026-06-03
+
+    Pin CI Actions To Commit SHAs = decision:
+      id: shp4nqx7
+      why: >
+        Pin every GitHub Actions `uses:` reference to a full 40-hex commit SHA
+        with a trailing `# vN` comment, resolved authoritatively from upstream
+        (git ls-remote / gh api — never from memory), rather than a mutable tag
+        (@v6, @v7) or branch (@release/v1). A mutable tag/branch can be silently
+        retargeted to malicious code (the tj-actions / Megalodon class); a SHA
+        cannot. The pinned releases were also checked to run on the node24
+        action runtime (checkout v6.0.3, setup-uv v7.6.0; gh-action-pypi-publish
+        is a composite action), avoiding the deprecated-node20 warning. Set
+        persist-credentials: false on checkout so the job's GITHUB_TOKEN is not
+        left in the checkout's git config for later steps. The dependabot
+        github-actions ecosystem entry is grouped (groups.actions.patterns
+        ["*"]) so SHA+comment bumps arrive as a single PR and the pins stay
+        current without manual drift. Resolves CI Actions Not SHA-Pinned
+        (aq4nvx7p).
+      approved-by: daniel, 2026-06-03
+
+    Resolve External CLI Binaries To Absolute Paths = decision:
+      id: bpr7nqx4
+      why: >
+        At each site that spawns an external CLI by bare name, resolve the name
+        to an absolute path via shutil.which and invoke the resolved path.
+        confer-daemon (_spawn_daemon) and claude (_register_with_claude) already
+        resolved the path — _spawn_daemon even LOGGED it "so a PATH-shadow attack
+        is visible in retrospect" — but then discarded it and re-spawned the bare
+        name, so the binary actually exec'd could differ from the one resolved
+        and logged (a PATH-hijack window, and the retrospect log was misleading).
+        git (_detect_repo_and_branch) is resolved the same way for consistency.
+        Where the name does not resolve, fall back to the bare name: an
+        unresolvable name has nothing on PATH to substitute, and all three sites
+        already degrade gracefully (daemon spawn fails as before, claude prints
+        the manual command, git falls back to a detached label). No shell=True
+        and no string-concatenated commands are introduced — every call stays
+        argument-vector form. scripts/release.py (a maintainer-only local script
+        that shells out to bare `git`) is intentionally left as-is: it is not
+        runtime/shipped code and runs only in daniel's trusted shell.
+      approved-by: daniel, 2026-06-03
 
     # ─── PROMPT AUDIT HISTORY ────────────────────────────────────────────────
 

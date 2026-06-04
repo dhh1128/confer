@@ -272,9 +272,13 @@ def _detect_repo_and_branch() -> tuple[str, str]:
     """Combined git probe: one subprocess for both toplevel and branch.
     Falls back to (cwd basename, 'detached') when not in a git repo, when
     git is not installed, or on detached HEAD."""
+    # Resolve git to an absolute path so a PATH change between startup and use
+    # can't swap the binary; fall back to the bare name when unresolved (nothing
+    # on PATH to hijack, and git-missing already degrades to a detached label).
+    git = shutil.which("git") or "git"
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
+            [git, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
@@ -300,7 +304,10 @@ def _spawn_daemon() -> None:
     log_fh = open(log_path, "a")
     try:
         subprocess.Popen(
-            ["confer-daemon"],
+            # Spawn the PATH-resolved absolute path (the one logged above), not
+            # the bare name, so the binary exec'd matches the one resolved; fall
+            # back to the bare name only when it is not on PATH (bpr7nqx4).
+            [resolved or "confer-daemon"],
             start_new_session=True,
             stdout=log_fh,
             stderr=log_fh,
