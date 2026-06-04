@@ -23,28 +23,31 @@ def resolve_confer_bin() -> str:
 
 _AWAY_MD = """\
 ---
-description: Turn on confer away mode (route interaction to Discord)
+description: Turn on confer away mode now, or schedule it (e.g. /away at 1100)
+argument-hint: "[in <min> | at <HHMM>]"
 allowed-tools: Bash({bin} away:*)
 ---
 Enabling confer away mode:
 
-!`{bin} away`
+!`{bin} away $ARGUMENTS`
 
-I'm away from the keyboard. Until I'm back, when you'd pause for my input or
-finish a task, reach me with the confer `ask`/`notify` tools instead of waiting
-at the terminal.
+I'm away from the keyboard (now, or as scheduled above). Until I'm back, when
+you'd pause for my input or finish a task, reach me with the confer
+`ask`/`notify` tools instead of waiting at the terminal.
 """
 
 _BACK_MD = """\
 ---
-description: Turn off confer away mode
+description: Turn off confer away mode, or cancel a scheduled away
+argument-hint: "[at <HHMM> | all]"
 allowed-tools: Bash({bin} back:*)
 ---
 Disabling confer away mode:
 
-!`{bin} back`
+!`{bin} back $ARGUMENTS`
 
-I'm back at the keyboard; resume normal interactive behavior.
+I'm back at the keyboard; resume normal interactive behavior (any future
+scheduled aways are preserved unless I said 'all').
 """
 
 

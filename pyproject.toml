@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "discord-py>=2.7.1",
-    "mcp>=1.27.1",
+    "mcp>=1.27.2",
 ]
 
 [project.urls]
@@ -42,7 +42,7 @@ packages = ["src/confer"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
 ]

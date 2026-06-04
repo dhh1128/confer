@@ -34,6 +34,22 @@ def test_install_fresh(env):
     assert any("add Stop hook" in a for a in actions)
 
 
+def test_slash_commands_pass_arguments_through(env):
+    """The /away /back slash commands must forward their args to the CLI so
+    '/away at 1100' works (av7nkp4x)."""
+    integrations.install(**env, dry_run=False)
+    away = (env["commands_dir"] / "away.md").read_text()
+    back = (env["commands_dir"] / "back.md").read_text()
+    assert "/usr/local/bin/confer away $ARGUMENTS" in away
+    assert "/usr/local/bin/confer back $ARGUMENTS" in back
+
+
+def test_install_writes_no_status_slash_command(env):
+    """status is CLI-only — no /status slash command is installed (av7nkp4x)."""
+    integrations.install(**env, dry_run=False)
+    assert not (env["commands_dir"] / "status.md").exists()
+
+
 def test_install_is_idempotent(env):
     integrations.install(**env, dry_run=False)
     actions = integrations.install(**env, dry_run=False)

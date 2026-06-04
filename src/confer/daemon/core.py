@@ -25,6 +25,7 @@ from confer.daemon.routing import (
     route_user_message,
 )
 from confer.daemon.transport import FAILURE_PREFIX, DiscordTransport
+from confer.presence import read_presence
 from confer.protocol import (
     CURRENT_PROTOCOL_VERSION,
     AskBegin,
@@ -54,6 +55,7 @@ from confer.protocol import (
 log = logging.getLogger(__name__)
 
 _SKIP_REPING_NEAR_DEADLINE = 60.0  # seconds
+_PRESENCE_POLL_SECONDS = 15.0  # activation-notice cadence (cs7nkp4x)
 _QUEUE_PER_LABEL_LIMIT = 100
 _NOTIFY_TAGS_PER_LABEL = 20  # cap on live replyable notify-threads per agent
 _TAG_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"  # base32, matches node ids
@@ -71,6 +73,22 @@ def _should_skip_reping(now: float, deadline_at: float) -> bool:
     a timeout DM). Pure helper so the 60s-window arithmetic is unit-testable
     across the boundary without wall-clock sleeps (review finding TST-F1/F3)."""
     return deadline_at - now < _SKIP_REPING_NEAR_DEADLINE
+
+
+def _activation_notice_text(note: str | None) -> str:
+    """The DM announcing a scheduled away just engaged (cs7nkp4x)."""
+    if note:
+        return f"confer: Now in away mode — {note}"
+    return "confer: Now in away mode"
+
+
+def _newly_fired_activations(pending, announced: set, now: float) -> list:
+    """Pure helper (cs7nkp4x): among pending entries, those whose time has
+    arrived (at <= now) and that have not yet been announced (keyed by their
+    `at` epoch). Returns the list of newly-fired PendingAway entries; the caller
+    records their keys in `announced`. Keeps the at-most-once-per-daemon-life
+    decision out of the async loop so it is unit-testable."""
+    return [p for p in pending if p.at <= now and p.at not in announced]
 
 
 def _closing_dm_text(reason: str, tag: str) -> str:
@@ -180,13 +198,17 @@ class Daemon:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._transport = transport
         self._re_ping_every_seconds = re_ping_every_seconds
         # Injectable for deterministic timing tests (Two-Layer Test Strategy
         # addendum, 7vpm2qkx); default to real monotonic time / asyncio.sleep.
+        # wall_clock is epoch time, used by the activation-notice watcher to
+        # compare against scheduled-away timestamps (cs7nkp4x).
         self._clock = clock
         self._sleep = sleep
+        self._wall_clock = wall_clock
         self._clients: dict[str, _Client] = {}
         self._pending_asks: dict[str, _PendingAsk] = {}
         self._notify_threads: dict[str, _NotifyThread] = {}
@@ -194,6 +216,9 @@ class Daemon:
         self._server: asyncio.AbstractServer | None = None
         self._start_time: float | None = None
         self._stop_event: asyncio.Event | None = None
+        # at-most-once-per-daemon-life record of announced activations (nd7nkp4x)
+        self._announced_activations: set[float] = set()
+        self._presence_task: asyncio.Task | None = None
 
     def stop(self) -> None:
         """Trigger graceful shutdown of a running serve() call."""
@@ -241,6 +266,7 @@ class Daemon:
         log.info("daemon listening on %s (pid %s)", socket_path, os.getpid())
 
         self._stop_event = asyncio.Event()
+        self._presence_task = asyncio.create_task(self._presence_watch_loop())
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             with suppress(NotImplementedError):
@@ -252,6 +278,9 @@ class Daemon:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 with suppress(NotImplementedError, ValueError):
                     loop.remove_signal_handler(sig)
+            self._presence_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._presence_task
             self._server.close()
             with suppress(Exception):
                 await self._server.wait_closed()
@@ -734,6 +763,28 @@ class Daemon:
             question=pending.question,
             started_at=pending.started_at,
         )
+
+    async def _check_activations_once(self) -> None:
+        """One pass of the activation-notice watcher (cs7nkp4x): read presence,
+        DM for any pending entry that has fired since we last looked, and record
+        it so it is announced at most once per daemon lifetime (nd7nkp4x)."""
+        presence = read_presence()
+        if not presence.pending:
+            return
+        now = self._wall_clock()
+        for fired in _newly_fired_activations(
+            presence.pending, self._announced_activations, now
+        ):
+            self._announced_activations.add(fired.at)
+            await self._send_dm_best_effort(_activation_notice_text(fired.note))
+
+    async def _presence_watch_loop(self) -> None:
+        """Poll presence on a coarse cadence and emit activation notices. Best-
+        effort: only runs while the daemon is alive (nd7nkp4x)."""
+        while True:
+            with suppress(Exception):
+                await self._check_activations_once()
+            await self._sleep(_PRESENCE_POLL_SECONDS)
 
     async def _send_dm_best_effort(self, body: str) -> None:
         """Send a DM whose return value we don't surface to any agent (closing

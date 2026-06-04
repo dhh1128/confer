@@ -402,7 +402,8 @@ def test_register_with_claude_success(monkeypatch, capsys):
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
     cli_mod._register_with_claude()
-    assert calls == [["claude", "mcp", "add", "confer", "--", "confer-server"]]
+    # The PATH-resolved absolute path is invoked, not the bare name (bpr7nqx4).
+    assert calls == [["/usr/bin/claude", "mcp", "add", "confer", "--", "confer-server"]]
     assert "Registered confer with Claude Code" in capsys.readouterr().out
 
 
@@ -450,7 +451,17 @@ def cli_presence(tmp_path, monkeypatch):
 
 def test_parser_away_with_note():
     args = _build_parser().parse_args(["away", "--note", "lunch"])
-    assert args.cmd == "away" and args.note == "lunch"
+    assert args.cmd == "away" and args.note == "lunch" and args.when == []
+
+
+def test_parser_away_with_schedule_words():
+    args = _build_parser().parse_args(["away", "at", "1100"])
+    assert args.cmd == "away" and args.when == ["at", "1100"]
+
+
+def test_parser_back_with_target_words():
+    args = _build_parser().parse_args(["back", "at", "1100"])
+    assert args.cmd == "back" and args.target == ["at", "1100"]
 
 
 def test_parser_hook_rejects_unknown_event():
@@ -482,23 +493,103 @@ def test_main_back_clears_presence(cli_presence, capsys):
     assert "away mode OFF" in capsys.readouterr().out
 
 
-def test_main_presence_present(cli_presence, capsys):
-    assert main(["presence"]) == 0
+def test_main_status_present(cli_presence, capsys):
+    assert main(["status"]) == 0
     assert capsys.readouterr().out.strip() == "present"
 
 
-def test_main_presence_away_with_note(cli_presence, capsys):
+def test_main_status_away_with_note(cli_presence, capsys):
     from confer import presence as presence_mod
     presence_mod.set_away("lunch", now=1.0)
-    assert main(["presence"]) == 0
+    assert main(["status"]) == 0
     assert capsys.readouterr().out.strip() == 'away — note: "lunch"'
 
 
-def test_main_presence_away_no_note(cli_presence, capsys):
+def test_main_status_away_no_note(cli_presence, capsys):
     from confer import presence as presence_mod
     presence_mod.set_away(now=1.0)
-    assert main(["presence"]) == 0
+    assert main(["status"]) == 0
     assert capsys.readouterr().out.strip() == "away"
+
+
+# ─── scheduled away (sq7nkp4x) via the CLI ──────────────────────────────────
+
+def test_main_away_in_schedules_future(cli_presence, capsys):
+    assert main(["away", "in", "5"]) == 0
+    assert "away scheduled for" in capsys.readouterr().out
+    from confer import presence as presence_mod
+    assert len(presence_mod.read_presence().pending) == 1
+
+
+def test_main_away_at_schedules_future(cli_presence, capsys):
+    assert main(["away", "at", "1800", "--note", "mtg"]) == 0
+    out = capsys.readouterr().out
+    assert "away scheduled for" in out and '"mtg"' in out
+
+
+def test_main_away_bad_schedule_word_errors(cli_presence, capsys):
+    assert main(["away", "soon"]) == 2
+    assert "expected 'in" in capsys.readouterr().err
+
+
+def test_main_away_bad_in_value_errors(cli_presence, capsys):
+    assert main(["away", "in", "soon"]) == 2
+    assert "confer:" in capsys.readouterr().err
+
+
+def test_main_away_bad_at_value_errors(cli_presence, capsys):
+    assert main(["away", "at", "2500"]) == 2
+    assert "confer:" in capsys.readouterr().err
+
+
+def test_main_back_all_clears_everything(cli_presence, capsys):
+    from confer import presence as presence_mod
+    presence_mod.set_away(now=1.0)
+    presence_mod.schedule_away(at=9_999_999_999.0)
+    assert main(["back", "all"]) == 0
+    assert not cli_presence.exists()
+    assert "all scheduled aways" in capsys.readouterr().out
+
+
+def test_main_back_at_cancels_matching(cli_presence, capsys, monkeypatch):
+    from confer import awaytime, presence as presence_mod
+    at = awaytime.parse_at_clock("1800")
+    presence_mod.schedule_away(at=at, note="mtg")
+    assert main(["back", "at", "1800"]) == 0
+    assert "cancelled the scheduled away" in capsys.readouterr().out
+    assert presence_mod.read_presence().pending == ()
+
+
+def test_main_back_at_no_match_reports(cli_presence, capsys):
+    from confer import awaytime, presence as presence_mod
+    presence_mod.schedule_away(at=awaytime.parse_at_clock("1800"))
+    # 1900 doesn't match the 1800 entry.
+    assert main(["back", "at", "1900"]) == 1
+    err = capsys.readouterr().err
+    assert "no scheduled away" in err and "Pending:" in err
+
+
+def test_main_back_at_no_match_empty_schedule(cli_presence, capsys):
+    assert main(["back", "at", "1900"]) == 1
+    assert "nothing is scheduled" in capsys.readouterr().err
+
+
+def test_main_back_at_bad_time_errors(cli_presence, capsys):
+    assert main(["back", "at", "2500"]) == 2
+    assert "confer:" in capsys.readouterr().err
+
+
+def test_main_back_unrecognized_target_errors(cli_presence, capsys):
+    assert main(["back", "sideways"]) == 2
+    assert "unrecognized" in capsys.readouterr().err
+
+
+def test_main_status_shows_schedule(cli_presence, capsys):
+    from confer import awaytime, presence as presence_mod
+    presence_mod.schedule_away(at=awaytime.parse_at_clock("1800"), note="standup")
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "present" in out and "scheduled away:" in out and "standup" in out
 
 
 def test_main_hook_prompt_clears_presence(cli_presence):
@@ -523,6 +614,33 @@ def test_main_hook_stop_blocks_when_away(cli_presence, tmp_path, monkeypatch, ca
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     assert main(["hook", "stop"]) == 2
     assert "away from the keyboard" in capsys.readouterr().err
+
+
+def test_main_hook_silences_warning_logging(cli_presence, monkeypatch):
+    """Regression for hk7nqp4m: a WARNING logged while the hook runs (e.g. the
+    WSL XDG_RUNTIME_DIR fallback in paths.py) must NOT reach stderr via Python's
+    lastResort handler, or Claude Code mislabels the whole hook invocation a
+    'Stop hook error'. The hook entrypoint must disable warning-level logging so
+    the process emits only its intended payload. Asserted via the mechanism
+    (warning logging disabled) because pytest's own log capture masks the
+    lastResort-to-stderr path this bug rides on."""
+    import logging
+
+    captured = {}
+
+    def check_logging_state(_stdin):
+        captured["warning_enabled"] = logging.getLogger("confer.paths").isEnabledFor(
+            logging.WARNING
+        )
+        return (0, "")
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr("confer.hooks.run_stop_hook", check_logging_state)
+    assert main(["hook", "stop"]) == 0
+    assert captured["warning_enabled"] is False, (
+        "hook entrypoint must disable WARNING logging so paths.py's "
+        "XDG fallback warning cannot leak to stderr"
+    )
 
 
 def test_main_install_hooks_applies(monkeypatch, capsys):

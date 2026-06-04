@@ -12,6 +12,7 @@ Two hooks (registered globally by `confer install-hooks`, ii7nqkp4):
 """
 
 import json
+import time
 
 from confer.presence import Presence, read_presence, set_present
 
@@ -26,10 +27,35 @@ _AWAY_REASON = (
 )
 
 
+def _is_genuine_human_turn(obj: dict) -> bool:
+    """True if `obj` is a real human prompt, not a tool_result envelope.
+
+    Claude Code records BOTH human prompts and tool_results as messages with
+    type=='user' (lp7nkq4x). A tool_result envelope's content is composed
+    solely of tool_result blocks; a genuine human turn carries text or other
+    blocks. We must key the 'since the last human turn' window off the latter,
+    or the agent's own confer tool_result resets the window and the guard
+    re-nudges after the agent already reached out."""
+    if obj.get("type") != "user":
+        return False
+    content = (obj.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return True  # a plain-string human prompt
+    if not isinstance(content, list):
+        return True  # unknown shape → treat as a human turn (conservative)
+    # A human turn if any block is NOT a tool_result (text, image, etc.). An
+    # all-tool_result message is the agent's tool output, not a human turn.
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+            return True
+    return False
+
+
 def _confer_tool_used_since_last_user(transcript_path: str) -> bool:
-    """True if any mcp__confer__* tool_use appears after the last human turn in
-    the JSONL transcript. Fail-open: any read/parse trouble returns True (treat
-    as 'already reached out') so the Stop hook does not block (eh7nqkp4)."""
+    """True if any mcp__confer__* tool_use appears after the last GENUINE human
+    turn in the JSONL transcript. Fail-open: any read/parse trouble returns True
+    (treat as 'already reached out') so the Stop hook does not block (eh7nqkp4).
+    """
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             raw_lines = f.readlines()
@@ -49,7 +75,7 @@ def _confer_tool_used_since_last_user(transcript_path: str) -> bool:
         parsed.append(obj if isinstance(obj, dict) else None)
     last_user = -1
     for i, obj in enumerate(parsed):
-        if obj is not None and obj.get("type") == "user":
+        if obj is not None and _is_genuine_human_turn(obj):
             last_user = i
     for obj in parsed[last_user + 1:]:
         if obj is None or obj.get("type") != "assistant":
@@ -69,13 +95,18 @@ def _confer_tool_used_since_last_user(transcript_path: str) -> bool:
 
 
 def run_stop_hook(
-    stdin_text: str, *, presence: Presence | None = None
+    stdin_text: str,
+    *,
+    presence: Presence | None = None,
+    now: float | None = None,
 ) -> tuple[int, str]:
     """Return (exit_code, stderr_text). (2, reason) blocks the stop and feeds
-    `reason` to the model; (0, "") allows it. `presence` is injectable for
-    tests; defaults to a fresh read."""
+    `reason` to the model; (0, "") allows it. `presence`/`now` are injectable
+    for tests; default to a fresh read and wall-clock. Uses EFFECTIVE-away
+    (sticky OR a fired scheduled entry, sq7nkp4x), not just the sticky flag."""
+    when = time.time() if now is None else now
     presence = read_presence() if presence is None else presence
-    if not presence.away:
+    if not presence.effective_away(when):
         return (0, "")
     try:
         data = json.loads(stdin_text)
@@ -90,12 +121,15 @@ def run_stop_hook(
         return (0, "")
     if _confer_tool_used_since_last_user(transcript_path):
         return (0, "")
-    note = f" — {presence.note}" if presence.note else ""
+    active_note = presence.active_note(when)
+    note = f" — {active_note}" if active_note else ""
     return (2, _AWAY_REASON.format(note=note))
 
 
 def run_prompt_hook() -> int:
     """UserPromptSubmit side effect: the user is typing here, so they are back
-    everywhere. Always allow the prompt (exit 0)."""
+    everywhere. Clears sticky away and any already-fired schedule entry, but
+    leaves still-pending future entries (ar7nqkp4 / sq7nkp4x). Always allow the
+    prompt (exit 0)."""
     set_present()
     return 0

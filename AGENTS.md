@@ -113,3 +113,59 @@ needed) to form theories about design decisions in this codebase. Then interview
 or disprove your theories, and write a starter `this.i` when you're done. (If the codebase is empty,
 just ask the user about their intentions for it, and begin building from there.)
 <!-- END AGENTPREP MANAGED BLOCK -->
+
+---
+
+## Defect management (GitHub Issues)
+
+This repo tracks defects as **GitHub Issues** on `dhh1128/confer`, managed
+with the `gh` CLI (no issue tracker MCP server is used). Issues are enabled
+and the standard `bug` label exists.
+
+**Logging a bug.** When a maintainer says "log a bug about X" (or an agent
+discovers a defect worth tracking), create the issue immediately — do not
+wait for further confirmation — and report the issue number and URL:
+
+```
+gh issue create --repo dhh1128/confer --label bug \
+  --title "<concise summary of the defect>" \
+  --body "$(cat <<'EOF'
+## Summary
+<one-paragraph description>
+
+## Steps to reproduce
+1. ...
+
+## Expected
+<what should happen>
+
+## Actual
+<what happens instead>
+
+## Environment
+<version / OS / config relevant to the bug, if any>
+
+## Notes
+<logs, stack traces, suspected cause, related issues>
+EOF
+)"
+```
+
+Fill in every section you can; omit a section's body only when it genuinely
+does not apply. The only triage label is `bug` — no severity/priority labels.
+Use milestones or comments if prioritization is needed later.
+
+**Fixing a bug.** When a maintainer says "let's fix bug X":
+
+1. Resolve X to an issue: `gh issue list --repo dhh1128/confer --label bug
+   --state open --search "X"`, or `gh issue view <n>` if given a number.
+   Confirm the match before proceeding.
+2. Fix it TDD-style per the Testing Protocol above (failing test first).
+   This repo commits and pushes directly to `main` — no `fix/` branch and no
+   PR ceremony (see the AgentPrep block above and `docs/methodology.md` §9).
+3. Reference `Fixes #<n>` in the commit message so the issue auto-closes when
+   the change lands on `main`. Record any design decision the fix entails in
+   `this.i` first, per the methodology.
+
+**Finding bugs.** `gh issue list --repo dhh1128/confer --label bug
+--state open` lists the open defect backlog; `gh issue view <n>` shows one.
