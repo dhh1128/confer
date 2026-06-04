@@ -402,7 +402,8 @@ def test_register_with_claude_success(monkeypatch, capsys):
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
     cli_mod._register_with_claude()
-    assert calls == [["claude", "mcp", "add", "confer", "--", "confer-server"]]
+    # The PATH-resolved absolute path is invoked, not the bare name (bpr7nqx4).
+    assert calls == [["/usr/bin/claude", "mcp", "add", "confer", "--", "confer-server"]]
     assert "Registered confer with Claude Code" in capsys.readouterr().out
 
 

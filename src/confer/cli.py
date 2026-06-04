@@ -126,7 +126,9 @@ def _register_with_claude() -> None:
             "To register manually:\n" + manual
         )
         return
-    result = subprocess.run(["claude", "mcp", "add", "confer", "--", "confer-server"])
+    # Invoke the PATH-resolved absolute path (already validated non-None above),
+    # not the bare name, so a PATH change can't swap the binary (bpr7nqx4).
+    result = subprocess.run([claude, "mcp", "add", "confer", "--", "confer-server"])
     if result.returncode == 0:
         print("Registered confer with Claude Code (claude mcp add).")
     else:
