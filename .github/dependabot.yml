@@ -8,6 +8,11 @@ updates:
     schedule:
       interval: "weekly"
     labels: ["dependencies", "github-actions"]
+    # Group SHA-pin bumps so each weekly update (SHA + the trailing # vN
+    # comment, updated together) arrives as a single PR (this.i shp4nqx7).
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: "pip"
     directory: "/"

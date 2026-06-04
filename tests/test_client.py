@@ -98,6 +98,37 @@ def test_auto_label_uses_detached_when_git_output_is_short(monkeypatch, tmp_path
         assert auto_label() == "tiny/detached"
 
 
+def test_auto_label_resolves_git_to_absolute_path(monkeypatch):
+    """git is normally resolved via shutil.which so the absolute path is run."""
+    monkeypatch.setattr(client_mod.shutil, "which", lambda _: "/usr/bin/git")
+    seen = []
+
+    def fake_run(cmd, **_):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="/x/repo\nmain\n", stderr="")
+
+    with patch.object(client_mod.subprocess, "run", side_effect=fake_run):
+        assert auto_label() == "repo/main"
+    assert seen[0][0] == "/usr/bin/git"
+
+
+def test_auto_label_falls_back_to_bare_git_when_not_on_path(monkeypatch, tmp_path):
+    """When git is not on PATH, fall back to the bare name (nothing to hijack)."""
+    cwd = tmp_path / "nopath"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(client_mod.shutil, "which", lambda _: None)
+    seen = []
+
+    def fake_run(cmd, **_):
+        seen.append(cmd)
+        raise FileNotFoundError
+
+    with patch.object(client_mod.subprocess, "run", side_effect=fake_run):
+        assert auto_label() == "nopath/detached"
+    assert seen[0][0] == "git"
+
+
 def test_spawn_daemon_logs_resolved_binary_path(tmp_path, monkeypatch, caplog):
     """The PATH-resolved confer-daemon path should be logged so a PATH-
     shadow attack is visible in retrospect via the log."""
@@ -108,13 +139,15 @@ def test_spawn_daemon_logs_resolved_binary_path(tmp_path, monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="confer.client"), patch.object(
         client_mod.subprocess, "Popen"
-    ):
+    ) as popen:
         client_mod._spawn_daemon()
 
     assert any(
         "PATH-resolved to: /usr/local/bin/confer-daemon" in record.getMessage()
         for record in caplog.records
     )
+    # The resolved absolute path is what actually gets spawned (bpr7nqx4).
+    assert popen.call_args.args[0] == ["/usr/local/bin/confer-daemon"]
 
 
 def test_spawn_daemon_logs_when_binary_not_on_path(tmp_path, monkeypatch, caplog):
@@ -125,12 +158,14 @@ def test_spawn_daemon_logs_when_binary_not_on_path(tmp_path, monkeypatch, caplog
 
     with caplog.at_level(logging.INFO, logger="confer.client"), patch.object(
         client_mod.subprocess, "Popen"
-    ):
+    ) as popen:
         client_mod._spawn_daemon()
 
     assert any(
         "not found on PATH" in record.getMessage() for record in caplog.records
     )
+    # Unresolvable name falls back to the bare name (nothing on PATH to hijack).
+    assert popen.call_args.args[0] == ["confer-daemon"]
 
 
 def test_spawn_daemon_closes_log_fh_in_parent(tmp_path, monkeypatch):
@@ -287,6 +322,7 @@ async def test_connect_auto_spawns_daemon_when_socket_missing(tmp_path, monkeypa
     monkeypatch.setattr(client_mod, "socket_path", lambda: sock)
     monkeypatch.setattr(client_mod, "log_file", lambda: tmp_path / "daemon.log")
     monkeypatch.setattr(client_mod, "_DAEMON_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(client_mod.shutil, "which", lambda _: "/opt/bin/confer-daemon")
 
     popen_calls = []
     server_holder: list = []
@@ -316,7 +352,8 @@ async def test_connect_auto_spawns_daemon_when_socket_missing(tmp_path, monkeypa
     try:
         await c.connect()
         assert c.label == "x"
-        assert popen_calls == [["confer-daemon"]]
+        # Spawns the PATH-resolved absolute path, not the bare name (bpr7nqx4).
+        assert popen_calls == [["/opt/bin/confer-daemon"]]
     finally:
         await c.close()
         await spawn_task[0]

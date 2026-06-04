@@ -1,8 +1,35 @@
 """Shared pytest fixtures for the confer test suite."""
 
 import os
+from datetime import date
 
 import pytest
+
+import freshness
+
+# Set true once any integration-marked test passes its call phase, so the
+# auto-stamp hook (this.i m4xq7npk) refreshes the freshness stamp only when the
+# integration tier actually ran green — not on a plain unit run.
+_integration_passed = False
+
+
+def pytest_runtest_logreport(report):
+    global _integration_passed
+    if (
+        report.when == "call"
+        and report.passed
+        and "integration" in report.keywords
+        and "interactive" not in report.keywords
+    ):
+        _integration_passed = True
+
+
+def pytest_sessionfinish(session):
+    """Auto-refresh the integration freshness stamp (this.i m4xq7npk) when the
+    integration tier ran AND the whole session was clean. A failed or flaky run
+    (session.testsfailed > 0) never refreshes the stamp."""
+    if _integration_passed and not session.testsfailed:
+        freshness.write_stamp(date.today())
 
 
 def pytest_addoption(parser):

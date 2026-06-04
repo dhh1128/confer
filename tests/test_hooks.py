@@ -1,7 +1,7 @@
 import json
 
 from confer import hooks
-from confer.presence import Presence
+from confer.presence import PendingAway, Presence
 
 
 def _jsonl(path, objs):
@@ -75,6 +75,61 @@ def test_stop_allows_when_confer_tool_used_after_last_user(tmp_path):
     assert hooks.run_stop_hook(payload, presence=AWAY) == (0, "")
 
 
+def test_stop_allows_when_confer_tool_used_then_its_tool_result_follows(tmp_path):
+    """Regression for lp7nkq4x: a tool_result is recorded as type=='user'.
+    The agent's own notify tool_result must NOT reset the 'last human turn'
+    window and cause a re-nudge — the guard must still see the confer call."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [
+        {"type": "user", "message": {"content": [
+            {"type": "text", "text": "do the thing and notify me"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__confer__notify", "input": {}}]}},
+        # The notify's OWN result — Claude Code records this as type=='user'.
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "sent at ..."}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "done, notified you"}]}},
+    ])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    assert hooks.run_stop_hook(payload, presence=AWAY) == (0, "")
+
+
+def test_stop_blocks_when_genuine_human_prompt_follows_confer_tool(tmp_path):
+    """The flip side of lp7nkq4x: if the human actually typed a NEW prompt
+    after the agent's confer call, that's a fresh turn — the agent has not
+    reached out since, so block."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__confer__notify", "input": {}}]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "sent at ..."}]}},
+        # A REAL human prompt (carries text, not just a tool_result).
+        {"type": "user", "message": {"content": [
+            {"type": "text", "text": "ok now do the next thing"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "working"}]}},
+    ])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    assert hooks.run_stop_hook(payload, presence=AWAY)[0] == 2
+
+
+def test_stop_treats_user_with_nonlist_content_as_human_turn(tmp_path):
+    """_is_genuine_human_turn: a type=='user' message whose content is neither
+    a str nor a list (e.g. null/dict) is treated conservatively as a human turn
+    (lp7nkq4x). Here the only confer call precedes such a message, so the guard
+    sees no confer tool since the last human turn → block."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__confer__notify", "input": {}}]}},
+        {"type": "user", "message": {"content": None}},
+    ])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    assert hooks.run_stop_hook(payload, presence=AWAY)[0] == 2
+
+
 def test_stop_handles_messy_transcript(tmp_path):
     t = tmp_path / "t.jsonl"
     lines = [
@@ -98,6 +153,40 @@ def test_stop_handles_messy_transcript(tmp_path):
     assert hooks.run_stop_hook(payload, presence=AWAY)[0] == 2
 
 
+def test_stop_allows_when_scheduled_away_not_yet_fired(tmp_path):
+    """A pending schedule that hasn't reached its time is not effective-away,
+    so the hook allows the stop (sq7nkp4x)."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [{"type": "user", "message": {"content": [
+        {"type": "text", "text": "hi"}]}}])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    pending = Presence(away=False, pending=(PendingAway(at=1000.0, note="mtg"),))
+    assert hooks.run_stop_hook(payload, presence=pending, now=999.0) == (0, "")
+
+
+def test_stop_blocks_with_fired_schedule_note(tmp_path):
+    """Once a scheduled entry's time arrives, the hook blocks and surfaces that
+    entry's note (active_note), even with no sticky away set."""
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [{"type": "user", "message": {"content": [
+        {"type": "text", "text": "hi"}]}}])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    pending = Presence(away=False, pending=(PendingAway(at=1000.0, note="standup"),))
+    code, msg = hooks.run_stop_hook(payload, presence=pending, now=1000.0)
+    assert code == 2 and "standup" in msg
+
+
+def test_stop_default_now_uses_wall_clock(tmp_path, monkeypatch):
+    """run_stop_hook with no now= reads the wall clock for effective-away."""
+    monkeypatch.setattr(hooks.time, "time", lambda: 5000.0)
+    t = tmp_path / "t.jsonl"
+    _jsonl(t, [{"type": "user", "message": {"content": [
+        {"type": "text", "text": "hi"}]}}])
+    payload = json.dumps({"stop_hook_active": False, "transcript_path": str(t)})
+    pending = Presence(away=False, pending=(PendingAway(at=4000.0),))  # fired by 5000
+    assert hooks.run_stop_hook(payload, presence=pending)[0] == 2
+
+
 def test_prompt_hook_clears_presence(tmp_path, monkeypatch):
     from confer import presence as presence_mod
     p = tmp_path / "confer.presence"
@@ -105,3 +194,16 @@ def test_prompt_hook_clears_presence(tmp_path, monkeypatch):
     presence_mod.set_away(now=1.0)
     assert hooks.run_prompt_hook() == 0
     assert not p.exists()
+
+
+def test_prompt_hook_preserves_future_pending(tmp_path, monkeypatch):
+    """Typing a prompt makes you present now but must NOT cancel a still-future
+    scheduled away (the ar7nqkp4 / sq7nkp4x invariant)."""
+    from confer import presence as presence_mod
+    p = tmp_path / "confer.presence"
+    monkeypatch.setattr(presence_mod, "presence_file", lambda: p)
+    monkeypatch.setattr(presence_mod.time, "time", lambda: 100.0)
+    presence_mod.schedule_away(at=9999.0, note="future mtg")
+    assert hooks.run_prompt_hook() == 0
+    pending = presence_mod.read_presence().pending
+    assert pending == (presence_mod.PendingAway(at=9999.0, note="future mtg"),)
