@@ -2346,6 +2346,39 @@ Confer = goal:
         repo auto-publishes without an explicit tagged release he creates;
         the workflow fires only on a tag he pushes deliberately.
 
+    Automated PyPI Publishing Disabled Until Owner Authorizes = decision:
+      id: pn7qvk4x
+      why: >
+        Supersedes the active wiring of PyPI Trusted Publishing (pp4nqvx7).
+        On 2026-06-06 daniel stated he never authorized, requested, or
+        configured any PyPI publishing and was surprised to find publish.yml
+        present — so the prior node's reassurance that "nothing auto-publishes
+        without a deliberate tag" was hollow: scripts/release.py pushes a v*
+        tag as its normal final step, and publish.yml triggers on `push:
+        tags: ["v*"]`, so a routine `release.py` run WOULD have set off a PyPI
+        upload attempt. That coupling (release = bump+tag, tag = publish) made
+        publishing an implicit side effect of versioning, which is exactly
+        what daniel did not authorize. Resolution: the publish workflow is
+        neutered by renaming it to publish.yml.disabled so GitHub will not
+        load it for ANY event — there is no longer a code path from a tag (or
+        anything else) to a PyPI upload. scripts/release.py is retained but is
+        now purely a version-bump-and-tag tool; its docstring/output and the
+        README/usage docs are corrected to stop claiming a tag publishes to
+        PyPI. Re-enabling is a deliberate, owner-only act gated on ALL of:
+        (a) daniel decides the code is mature enough to publish; (b) he claims
+        an available PyPI project name (the bare `confer` name is already
+        taken by an unrelated project, so a different name is required); (c)
+        the one-time trusted-publisher + `pypi` environment setup is done; and
+        (d) the deferred DevOps review findings on this path are addressed —
+        SHA-pin pypa/gh-action-pypi-publish (was @release/v1, a mutable branch,
+        review F1) and add a CI test gate before publish (review F2). Rejected
+        deleting publish.yml outright: daniel may publish eventually, and the
+        file (with its one-time-setup header) is the cheapest way to preserve
+        that wiring for a future deliberate re-enable; .disabled is fully
+        reversible with a single rename. Rejected leaving it on a
+        workflow_dispatch-only trigger: a manual run could still attempt a
+        publish, which is weaker than "absolutely neutered."
+
     confer setup Subcommand = decision:
       id: st7nqkp4
       why: >
