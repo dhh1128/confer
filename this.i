@@ -545,6 +545,37 @@ Confer = goal:
         explicit `confer-daemon stop` exists for clean termination when the
         user wants it (e.g., before upgrade or reboot).
 
+    Daemon Interaction Audit Log = decision:
+      id: dg7vnq4x
+      why: >
+        The daemon emits one INFO line to daemon.log at every confer
+        interaction lifecycle event: a notify sent (label, tag, ok/failed), an
+        ask begun (label, tag, give_up, on_timeout), an inbound user message
+        routed (the routing outcome — delivered/queued/broadcast/bounced/
+        ambiguous/concierge), an ask resolved by timeout (label, tag,
+        disposition), an ask withdrawn, an ask dropped on lost contact, and a
+        check_messages drain (label, count). Motivated directly by Productivity
+        While Away (the goal): the operator could not previously tell whether
+        agents were USING confer at all — the only daemon-authored INFO line
+        was "daemon listening", so the live log gave zero visibility into
+        notify/ask/check traffic, and the human's impression of adoption was
+        guesswork. An INFO audit trail makes adoption observable and lets the
+        operator distinguish "agents aren't reaching out" from "agents reached
+        out but I missed it." Chosen at INFO (not DEBUG) so it survives the
+        default root level (INFO, set in __main__._configure_logging) without a
+        config change, and INFO (not WARNING) because these are normal events,
+        not problems — keeping them out of the WARNING band that should mean
+        "something needs attention." Deliberately logs only metadata already
+        present in confer-authored envelopes (labels, tags, counts,
+        dispositions); message/question BODIES are NOT added beyond what DM
+        relaying already writes, so this does not widen the log's sensitivity
+        beyond Daemon Log And State Dir Perms (lp7nqkx4). One line per event,
+        not per poll, so it cannot itself become log spam (contrast wq4n7pxv).
+        Rejected a separate structured metrics/JSONL sink: overkill for a
+        single-user tool whose operator reads the log by eye via
+        `confer-daemon status`; plain INFO lines are greppable and already
+        rotation-managed (5jpxnq7w).
+
     Orphan Ask Drop Policy = decision:
       id: v4kn7mpq
       why: >
@@ -2235,6 +2266,40 @@ Confer = goal:
         configure logging; it is suppressed only on the hook hot path where its
         sole effect was to masquerade as an error.
       resolved-by: dh, 2026-05-29
+
+    XDG Fallback Warning Floods The Daemon Log = tension:
+      id: wq4n7pxv
+      nature: >
+        Follow-on to hk7nqp4m, found 2026-06-06 reviewing the live log. The
+        XDG-fallback warning that hk7nqp4m deliberately KEPT on the
+        logging-configured (daemon/CLI) paths is emitted by paths._xdg_runtime_
+        dir() on EVERY call, and the activation-notice watcher
+        (_presence_watch_loop, cs7nkp4x) calls read_presence() → presence_file()
+        → _xdg_runtime_dir() every 15s for the daemon's whole lifetime. On WSL2
+        (XDG_RUNTIME_DIR set but /run/user/<uid> not writable, pf4nqkx7) this
+        means the same correct, non-fatal warning is written ~4x/min forever.
+        Observed: 44,085 of 44,540 lines (99%, ~7MB over ~9 days) were this one
+        warning. The fallback is fine; the per-call cadence is the defect. It
+        defeats the operator's read-the-log workflow — `confer-daemon status`'s
+        "last 20 log lines" (5jpxnq7w) showed nothing but this warning — and
+        churns the RotatingFileHandler so real events age out of the kept
+        window within hours.
+      resolution: >
+        Emit the XDG-fallback warning AT MOST ONCE per distinct
+        XDG_RUNTIME_DIR value per process, via a module-level set of
+        already-warned values in paths.py. First fallback for a given value
+        warns (preserving hk7nqp4m's "still available on configured paths"
+        intent — the diagnostic is not lost); subsequent calls for the same
+        value are silent. Keyed by the value string (not a bare boolean) so a
+        genuinely changing env across the process still surfaces once each.
+        Rejected: (a) dropping the warning entirely — hk7nqp4m's intent was to
+        KEEP it where logging is configured, only suppress it on the hook hot
+        path; (b) moving the warning to daemon startup only — paths.py is the
+        single chokepoint and has no startup hook, and the per-value dedup is
+        simpler and also covers the CLI paths; (c) raising the presence-poll
+        interval — treats the symptom (poll cadence) not the cause (warn
+        cadence) and would slow activation notices (cs7nkp4x).
+      resolved-by: dh, 2026-06-06
 
     # ─── DISTRIBUTION ────────────────────────────────────────────────────────
 
