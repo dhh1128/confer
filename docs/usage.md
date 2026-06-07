@@ -26,8 +26,9 @@ uv tool install git+https://github.com/dhh1128/confer
 
 This drops all three console scripts — `confer`, `confer-server`, and
 `confer-daemon` — onto your PATH in one managed environment. No clone, no editable
-checkout, no maintainer access required. (A PyPI publish is planned that will
-shorten this to `uv tool install confer`.)
+checkout, no maintainer access required. (PyPI publishing is currently disabled
+and not owner-authorized — see `this.i` `pn7qvk4x`; install from the git URL or
+a local checkout.)
 
 Then configure and register in one step:
 

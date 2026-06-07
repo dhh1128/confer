@@ -60,7 +60,7 @@ Notes:
 
 ## Releasing
 
-Releases are cut with `scripts/release.py`, which bumps the version in `pyproject.toml`, runs the test suite, commits (signed off), and pushes a `v<x.y.z>` tag. That tag triggers [`publish.yml`](.github/workflows/publish.yml), which builds and publishes confer to PyPI via trusted publishing.
+`scripts/release.py` bumps the version in `pyproject.toml`, runs the test suite, commits (signed off), and pushes a `v<x.y.z>` tag. It does **not** publish anywhere — the tag is for record-keeping only. Distribution is via local `uv tool install` from a checkout (see the install section above).
 
 ```bash
 python scripts/release.py                       # patch bump, default message
@@ -71,7 +71,7 @@ python scripts/release.py --set 0.2.0 -m "..."  # set an explicit version
 
 Before running, the script refuses to proceed unless you're on `main`, the working tree is clean, and local `main` is in sync with `origin/main`; it then runs `uv run pytest` (which enforces 100% branch coverage) and only tags if that passes. Running the command is the release authorization — there is no extra confirmation prompt.
 
-**First release prerequisites (one-time, outward-facing — see [`publish.yml`](.github/workflows/publish.yml)):** confirm the `confer` name is available on PyPI, configure the PyPI trusted publisher for this repo + the `pypi` environment, and decide on a license (`pyproject.toml` has no `license` declared yet). The publish job will fail until these are done.
+**PyPI publishing is disabled.** It was never owner-authorized, so the publish workflow is neutered (renamed to `publish.yml.disabled` so GitHub won't run it; see `this.i` `pn7qvk4x`). Re-enabling is a deliberate, owner-only act: decide the code is mature, claim an **available** PyPI name (the bare `confer` name is taken by an unrelated project), do the one-time trusted-publisher + `pypi` environment setup, address the deferred DevOps findings (SHA-pin the publish action, add a CI test gate), pick a license (`pyproject.toml` declares none yet), then rename the workflow back.
 
 ## Contributing
 

@@ -1,3 +1,14 @@
+# ░░░ DISABLED — DO NOT RE-ENABLE WITHOUT OWNER AUTHORIZATION ░░░
+# This file is intentionally named *.disabled so GitHub does NOT load it as a
+# workflow: it cannot trigger on any event. Automated PyPI publishing was
+# never authorized by the owner (this.i: Automated PyPI Publishing Disabled
+# Until Owner Authorizes, pn7qvk4x). To re-enable, the owner must (per
+# pn7qvk4x): decide the code is mature, claim an AVAILABLE PyPI name (the bare
+# `confer` name is taken by an unrelated project), complete the trusted-
+# publisher + `pypi` environment setup below, address DevOps F1 (SHA-pin the
+# pypa publish action — currently @release/v1, a mutable branch) and F2 (add a
+# CI test gate before publish), THEN rename this file back to publish.yml.
+#
 # Publish confer to PyPI on a version tag (PyPI Trusted Publishing, pp4nqvx7).
 #
 # This uses PyPI's OIDC "trusted publisher" flow — no API token/secret is

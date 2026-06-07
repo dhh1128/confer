@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cut a release: bump version, commit, push, tag, push tag.
+"""Bump the version, commit, push, and push a v<x.y.z> tag.
 
 Usage:
     python scripts/release.py                       # patch bump, default message
@@ -13,8 +13,11 @@ Usage:
                                                     #    by >1 without
                                                     #    --allow-major-jump)
 
-The pushed v<x.y.z> tag triggers .github/workflows/publish.yml, which builds
-and publishes confer to PyPI (PyPI Trusted Publishing, this.i pp4nqvx7).
+This only versions and tags the repo. It does NOT publish anywhere: automated
+PyPI publishing is disabled (this.i pn7qvk4x; .github/workflows/publish.yml is
+renamed to *.disabled and will not run). Distribution is via local
+`uv tool install` from a checkout until the owner deliberately re-enables
+publishing.
 """
 
 import argparse
@@ -229,7 +232,7 @@ def main():
     run(["git", "tag", "-a", tag, "-m", f"Release {tag}: {message}"])
     run(["git", "push", "origin", tag])
 
-    print(f"Tagged and pushed {tag}. The release GHA will build and publish the assets.")
+    print(f"Tagged and pushed {tag}. No publish runs (pn7qvk4x); tag is for record only.")
 
 
 if __name__ == "__main__":
