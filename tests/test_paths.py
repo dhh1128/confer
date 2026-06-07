@@ -78,3 +78,22 @@ def test_runtime_dir_falls_back_to_state_home_when_unset(monkeypatch):
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     expected = Path.home() / ".local" / "state" / "confer" / "confer.sock"
     assert paths.socket_path() == expected
+
+
+def test_xdg_fallback_warning_emitted_once_per_value(monkeypatch, tmp_path, caplog):
+    """The fallback warning is correct but non-fatal; on WSL2 the same
+    unwritable XDG_RUNTIME_DIR is probed every 15s for the daemon's whole life
+    (wq4n7pxv). It must warn AT MOST ONCE per distinct value, not per call."""
+    import logging
+
+    nonexistent = tmp_path / "run-user-dedup"  # unique per test → fresh value
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(nonexistent))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    with caplog.at_level(logging.WARNING, logger="confer.paths"):
+        paths.socket_path()
+        paths.pid_file()
+        paths.presence_file()
+    warnings = [
+        r for r in caplog.records if "XDG_RUNTIME_DIR" in r.getMessage()
+    ]
+    assert len(warnings) == 1

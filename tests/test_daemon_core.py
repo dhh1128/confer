@@ -1576,3 +1576,148 @@ def test_pending_count_and_hint_helpers():
     daemon._queues["L"].clear()
     daemon._enqueue_message("L", "c", source="broadcast", tag=None)
     assert "1 message waiting" in daemon._pending_hint("L")
+
+
+# ─── interaction audit log (dg7vnq4x) ───────────────────────────────────────
+
+
+def _audit_records(caplog):
+    return [r for r in caplog.records if r.levelname == "INFO"]
+
+
+async def test_audit_log_notify(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._handle_notify(
+            Notify(request_id="r", message="hi"), writer, "confer/main"
+        )
+    tag = next(iter(daemon._notify_threads))
+    assert any(
+        m == f"notify: label=confer/main tag={tag} status=ok"
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_notify_failed_status(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    daemon._transport.notify = AsyncMock(
+        return_value=f"{FAILURE_PREFIX}boom>"
+    )
+    writer = await _hello_and_get_writer(daemon)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._handle_notify(
+            Notify(request_id="r", message="hi"), writer, "confer/main"
+        )
+    assert any(
+        "notify: label=confer/main" in m and "status=failed" in m
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_ask_begin(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        _, pending = await _register_ask(daemon, give_up_after_seconds=120)
+    assert any(
+        m == (
+            f"ask begin: label=confer/main tag={pending.tag} "
+            f"give_up=120s on_timeout=use_best_judgment"
+        )
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+    await daemon._handle_ask_cancel(pending.request_id)
+
+
+async def test_audit_log_route_outcome_delivered(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._dispatch_user_message("rebase please")
+    assert any(
+        m == "routed user message: outcome=delivered"
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_route_outcome_broadcast(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    daemon._clients["confer/main"] = _Client(
+        label="confer/main", writer=_writer_mock()
+    )
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._dispatch_user_message("everyone stop")
+    assert any(
+        m == "routed user message: outcome=broadcast"
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_ask_timeout(caplog):
+    import logging
+
+    daemon, fc = _clock_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    pending = _insert_pending(
+        daemon, writer, give_up_after_seconds=30, tag="tm01", on_timeout="abort"
+    )
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._timeout_loop(pending)
+    assert any(
+        m == "ask timeout: label=confer/main tag=tm01 disposition=abort"
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_ask_withdrawn(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._handle_ask_cancel(pending.request_id)
+    assert any(
+        m == f"ask withdrawn: label=confer/main tag={pending.tag}"
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_ask_dropped_on_disconnect(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    writer, pending = await _register_ask(daemon)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._drop_asks_for_writer(writer, "confer/main")
+    assert any(
+        m == (
+            f"ask dropped (lost contact): label=confer/main tag={pending.tag}"
+        )
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )
+
+
+async def test_audit_log_check_messages(caplog):
+    import logging
+
+    daemon = _make_daemon()
+    writer = await _hello_and_get_writer(daemon)
+    daemon._enqueue_message("confer/main", "hi", source="broadcast", tag=None)
+    daemon._enqueue_message("confer/main", "ho", source="broadcast", tag=None)
+    with caplog.at_level(logging.INFO, logger="confer.daemon.core"):
+        await daemon._handle_check_messages("r", "confer/main", writer)
+    assert any(
+        m == "check_messages: label=confer/main count=2"
+        for m in (r.getMessage() for r in _audit_records(caplog))
+    )

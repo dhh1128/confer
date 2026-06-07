@@ -434,6 +434,9 @@ class Daemon:
         body = f"[{tag}] {client_label}: {msg.message}"
         info = await self._transport.notify(body)
         status = "failed" if info.startswith(FAILURE_PREFIX) else "ok"
+        log.info(
+            "notify: label=%s tag=%s status=%s", client_label, tag, status
+        )
         # Piggyback hint (pb7nqm4x): fold a pending-message count into the
         # notify status string, only on success (the status string is
         # confer-authored, so appending to it pollutes nothing).
@@ -458,6 +461,13 @@ class Daemon:
             tag=self._assign_thread_tag(),
         )
         self._pending_asks[msg.request_id] = pending
+        log.info(
+            "ask begin: label=%s tag=%s give_up=%ss on_timeout=%s",
+            client_label,
+            pending.tag,
+            msg.give_up_after_seconds,
+            msg.on_timeout,
+        )
         await self._send_question_dm(pending)
         # Start the timeout and re-ping tasks. The timeout task fires first
         # if the give_up_after_seconds deadline elapses without a reply; the
@@ -469,6 +479,9 @@ class Daemon:
         pending = self._pending_asks.pop(request_id, None)
         if pending is None:
             return  # idempotent — already resolved
+        log.info(
+            "ask withdrawn: label=%s tag=%s", pending.label, pending.tag
+        )
         await self._cancel_ask_tasks(pending)
         await self._send_dm_best_effort(_closing_dm_text("withdrawn", pending.tag))
 
@@ -498,31 +511,34 @@ class Daemon:
         decision = route_user_message(content, asks, notifies, connected_labels)
 
         if isinstance(decision, Concierge):
-            return ("concierge", CONCIERGE_STUB, decision)
-        if isinstance(decision, DeliverAsk):
+            outcome, detail = ("concierge", CONCIERGE_STUB)
+        elif isinstance(decision, DeliverAsk):
             label = tag_to_label.get(decision.tag, "?")
             await self._deliver_reply_by_tag(decision.tag, decision.content, label)
-            return ("delivered", f"Delivered to {label}.", decision)
-        if isinstance(decision, EnqueueNotifyReply):
+            outcome, detail = ("delivered", f"Delivered to {label}.")
+        elif isinstance(decision, EnqueueNotifyReply):
             self._enqueue_message(
                 decision.label, decision.content,
                 source="notify_reply", tag=decision.tag,
             )
-            return ("queued_notify_reply", f"Queued for {decision.label}.", decision)
-        if isinstance(decision, Broadcast):
+            outcome, detail = ("queued_notify_reply", f"Queued for {decision.label}.")
+        elif isinstance(decision, Broadcast):
             for label in connected_labels:
                 self._enqueue_message(
                     label, decision.content, source="broadcast", tag=None
                 )
-            return (
+            outcome, detail = (
                 "broadcast",
                 f"Broadcast to {len(connected_labels)} connected agent(s).",
-                decision,
             )
-        if isinstance(decision, Bounce):
-            return ("bounced", decision.text, decision)
-        # Ambiguous
-        return ("ambiguous", self._format_ambiguous_dm(decision.asks), decision)
+        elif isinstance(decision, Bounce):
+            outcome, detail = ("bounced", decision.text)
+        else:  # Ambiguous
+            outcome, detail = ("ambiguous", self._format_ambiguous_dm(decision.asks))
+        # One audit line per inbound user message (dg7vnq4x) — the routing
+        # outcome is the observable adoption signal for the ask/reply path.
+        log.info("routed user message: outcome=%s", outcome)
+        return (outcome, detail, decision)
 
     async def _handle_inject(
         self, request_id: str, content: str, writer: asyncio.StreamWriter
@@ -570,6 +586,7 @@ class Daemon:
             count = len(queue)
             formatted = _format_queue_for_check_messages(queue)
             queue.clear()
+        log.info("check_messages: label=%s count=%s", client_label, count)
         await self._send(
             writer,
             CheckMessagesResult(
@@ -665,6 +682,12 @@ class Daemon:
         # Time's up. If the ask was already resolved (race), nothing to do.
         if self._pending_asks.pop(pending.request_id, None) is None:
             return
+        log.info(
+            "ask timeout: label=%s tag=%s disposition=%s",
+            pending.label,
+            pending.tag,
+            pending.on_timeout,
+        )
         with suppress(asyncio.CancelledError):
             if pending.re_ping_task is not None:
                 pending.re_ping_task.cancel()
@@ -698,6 +721,11 @@ class Daemon:
         orphans = [p for p in self._pending_asks.values() if p.writer is writer]
         for pending in orphans:
             self._pending_asks.pop(pending.request_id, None)
+            log.info(
+                "ask dropped (lost contact): label=%s tag=%s",
+                pending.label,
+                pending.tag,
+            )
             await self._cancel_ask_tasks(pending)
             await self._send_dm_best_effort(
                 _closing_dm_text("lost_contact", pending.tag)

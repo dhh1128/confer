@@ -4,6 +4,13 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# XDG_RUNTIME_DIR values we have already warned about falling back from. The
+# daemon probes the same value every 15s for its whole lifetime (presence
+# poll, cs7nkp4x), so without this the correct-but-non-fatal fallback warning
+# floods the log (XDG Fallback Warning Floods The Daemon Log, wq4n7pxv). Keyed
+# by value so a genuinely changing env still surfaces once each.
+_warned_runtime_dirs: set[str] = set()
+
 
 def _xdg_state_home() -> Path:
     val = os.environ.get("XDG_STATE_HOME")
@@ -22,7 +29,8 @@ def _xdg_runtime_dir() -> Path:
     val = os.environ.get("XDG_RUNTIME_DIR")
     if val and os.path.isdir(val) and os.access(val, os.W_OK):
         return Path(val)
-    if val:
+    if val and val not in _warned_runtime_dirs:
+        _warned_runtime_dirs.add(val)
         log.warning(
             "XDG_RUNTIME_DIR=%s is set but not a writable directory; "
             "falling back to %s/confer",
