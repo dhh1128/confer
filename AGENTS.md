@@ -1,53 +1,3 @@
-<!-- BEGIN AGENTPREP MANAGED BLOCK -->
-## AgentPrep AI Operating Rules
-
-Use of AI in conjunction with this repository is governed by
-[AgentPrep](https://github.com/provenant-dev/agentprep).
-
-As an AI, you will need to know how to identify yourself to the
-agentprep tool. Canonical ai_agent_name values are:
-
-    `claude`, `codex`, `copilot`, `cursor`, `gemini`, or `openclaw`
-
-If you are one of these tools, great; use the appropriate ai_agent_name
-with agentprep. If you are an AI but your name is not in this
-list, stop immediately and tell the user to manually edit this AGENTS.md
-file so you recognize your name in the list above.
-
-Once you can name yourself canonically, **before starting any task that
-will involve a git commit**, run:
-
-```bash
-agentprep verify --agent <ai_agent_name>   # or: export AGENTPREP_AGENT=<ai_agent_name>
-```
-
-If verification fails with `verify failed: missing .ai-safety-check.*`, **stop
-and tell the user before writing any files**. A git pre-commit hook (committed to
-`.githooks/pre-commit` and installed automatically to `.git/hooks/pre-commit` by
-`agentprep init` and `agentprep certify`) will block every commit you attempt until
-the user runs `agentprep certify --agent <name>` to attest a correct config. Do not
-attempt the task until the user confirms they've certified. Then cache the lease timestamp produced by `agentprep verify` once
-verification succeeds; you do not need to re-verify within the same session.
-
-The following operations are reserved for humans. The `.agent-bin` shims
-installed in this repository will block them if an agent attempts them:
-
-- Destructive push modes (`git push --delete`, `--all`, `--mirror`)
-- `gh pr merge` — merging a pull request
-- `gh repo delete` — deleting the repository
-
-This is a personal project, so the legal-risk rationale that motivates
-default-branch protection in shared/company repositories does not apply
-here. Agents commit and push directly to `main`; no feature-branch + PR
-ceremony is required. The gate ceremony in `docs/methodology.md` §9
-(explicit user approval before each push) still applies and is the
-primary safeguard.
-
-Place `.agent-bin` at the front of PATH in agent shells so the shims are active:
-
-```bash
-export PATH="$PWD/.agent-bin:$PATH"
-```
 ## Testing Protocol
 
 Strict TDD is in force. For every requirement, write failing tests that
@@ -112,60 +62,29 @@ and `docs/*.md` (possibly creating `docs/architecture.md` using the `generate-ar
 needed) to form theories about design decisions in this codebase. Then interview the user to confirm
 or disprove your theories, and write a starter `this.i` when you're done. (If the codebase is empty,
 just ask the user about their intentions for it, and begin building from there.)
-<!-- END AGENTPREP MANAGED BLOCK -->
 
----
 
-## Defect management (GitHub Issues)
+<!-- >>> tick stanza >>> (managed by `tick init`) -->
 
-This repo tracks defects as **GitHub Issues** on `dhh1128/confer`, managed
-with the `gh` CLI (no issue tracker MCP server is used). Issues are enabled
-and the standard `bug` label exists.
+## Task tracking: `tick`
 
-**Logging a bug.** When a maintainer says "log a bug about X" (or an agent
-discovers a defect worth tracking), create the issue immediately — do not
-wait for further confirmation — and report the issue number and URL:
+This repo tracks tasks, tech debt, and ideas in a local [`tick`](https://github.com/dhh1128/tick)
+ledger (an orphan `tick` branch; the `tick` CLI is the interface). Reads are plain
+files — do **not** use an external API for task tracking.
 
-```
-gh issue create --repo dhh1128/confer --label bug \
-  --title "<concise summary of the defect>" \
-  --body "$(cat <<'EOF'
-## Summary
-<one-paragraph description>
+- **First, if a `tick` command says the repo isn't initialized**, run `tick init`
+  once to connect this clone to the ledger — it adopts the existing remote ledger
+  if a colleague already set one up, or creates a new one otherwise.
+- **A tick mark is the sigil `~` immediately followed by a digit-first 4-char
+  base32 id** (the id part looks like `4mz3`, so the full mark is that id with a
+  leading `~`). It pins a tick to a code location.
+- **Before editing a file**, grep it for marks and read what they reference:
+  `rg '~[2-7][a-z2-7]{3}\b' <file>` then `tick show <id>`. A mark means recorded
+  context exists for that spot — read it first.
+- **Search** existing ticks with `tick grep <text>`; **list** with `tick ls`.
+- **Capture** new work with `tick add "<title>"` and place the printed mark
+  (`~` + the new id) at the relevant code spot.
+- When your change **resolves** a tick, run `tick off <id>` and **delete the
+  mark(s)** it reports still in the code.
 
-## Steps to reproduce
-1. ...
-
-## Expected
-<what should happen>
-
-## Actual
-<what happens instead>
-
-## Environment
-<version / OS / config relevant to the bug, if any>
-
-## Notes
-<logs, stack traces, suspected cause, related issues>
-EOF
-)"
-```
-
-Fill in every section you can; omit a section's body only when it genuinely
-does not apply. The only triage label is `bug` — no severity/priority labels.
-Use milestones or comments if prioritization is needed later.
-
-**Fixing a bug.** When a maintainer says "let's fix bug X":
-
-1. Resolve X to an issue: `gh issue list --repo dhh1128/confer --label bug
-   --state open --search "X"`, or `gh issue view <n>` if given a number.
-   Confirm the match before proceeding.
-2. Fix it TDD-style per the Testing Protocol above (failing test first).
-   This repo commits and pushes directly to `main` — no `fix/` branch and no
-   PR ceremony (see the AgentPrep block above and `docs/methodology.md` §9).
-3. Reference `Fixes #<n>` in the commit message so the issue auto-closes when
-   the change lands on `main`. Record any design decision the fix entails in
-   `this.i` first, per the methodology.
-
-**Finding bugs.** `gh issue list --repo dhh1128/confer --label bug
---state open` lists the open defect backlog; `gh issue view <n>` shows one.
+<!-- <<< tick stanza <<< -->
